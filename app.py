@@ -13,7 +13,7 @@ from src.doc_ai.pipeline import DocumentPipeline
 
 
 st.set_page_config(
-    page_title="AI Document Extraction & Data Quality Platform",
+    page_title="AI-Powered Data Quality Platform",
     page_icon=":page_facing_up:",
     layout="wide",
 )
@@ -111,16 +111,18 @@ def main() -> None:
     settings = get_settings()
     pipeline = DocumentPipeline(settings)
 
-    st.title("AI Document Extraction & Data Quality Platform")
-    st.caption("Upload a business document, extract structured fields, validate them, and store the output.")
+    st.title("AI-Powered Data Quality Platform for Unstructured Data")
+    st.caption(
+        "Upload an unstructured business document, convert it into structured data, validate the output, and review any corrections."
+    )
 
     with st.sidebar:
         st.subheader("Pipeline settings")
         extraction_mode = st.selectbox(
             "Extraction mode",
-            options=["adaptive-local", "template-only", "rule-based"],
+            options=["llm-assisted", "adaptive-local", "template-only", "rule-based"],
             index=0,
-            help="Use the adaptive local extractor, only learned templates, or a fixed regex baseline.",
+            help="Use an LLM for unfamiliar formats, adaptive local extraction, only learned templates, or a fixed rules baseline.",
         )
         learn_from_upload = st.checkbox(
             "Learn from successful uploads",
@@ -128,17 +130,21 @@ def main() -> None:
             help="Stores reusable anchors from high-quality runs so similar future documents are easier to parse.",
         )
         st.write(f"Data directory: `{settings.data_dir}`")
-        st.caption("Adaptive learning updates local template memory. It does not retrain a foundation model.")
+        if extraction_mode == "llm-assisted" and not settings.openai_api_key:
+            st.warning("`OPENAI_API_KEY` is not set. `llm-assisted` mode will fall back to adaptive local extraction.")
+        st.caption(
+            "Approved corrections improve template memory and extraction behavior. They do not fine-tune the foundation model."
+        )
 
     uploaded_file = st.file_uploader(
-        "Upload an invoice or similar business document",
+        "Upload an invoice or similar unstructured business document",
         type=["pdf", "txt", "md", "json"],
         accept_multiple_files=False,
     )
 
     if not uploaded_file:
         st.info("Upload a file to run the pipeline.")
-        with st.expander("Example invoice text for testing"):
+        with st.expander("Example unstructured invoice text for testing"):
             st.code(
                 "\n".join(
                     [

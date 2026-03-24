@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -140,12 +141,111 @@ class AdaptiveInvoiceAgent(BaseExtractor):
         return self._template_memory
 
 
+class LLMAssistedInvoiceAgent(BaseExtractor):
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._template_memory = TemplateMemory(settings.template_store_path)
+        self._adaptive_local = AdaptiveInvoiceAgent(settings)
+
+    def extract(self, parsed_document: ParsedDocument) -> dict[str, Any]:
+        result, _ = self.extract_with_trace(parsed_document)
+        return result
+
+    def extract_with_trace(self, parsed_document: ParsedDocument) -> tuple[dict[str, Any], list[str]]:
+        trace: list[str] = []
+        lines = parsed_document.sections
+        signature = TemplateMemory.build_signature(lines)
+        trace.append("Generated document signature from top lines and keywords.")
+
+        template_match = self._template_memory.find_best_match(signature)
+        if template_match:
+            trace.append(
+                f"Best learned template candidate was `{template_match.template.get('template_name', 'unknown')}` "
+                f"with similarity {template_match.score}."
+            )
+        else:
+            trace.append("No learned template candidates were available yet.")
+
+        # For familiar layouts, keep the faster local path.
+        if template_match and template_match.score >= 0.75:
+            extracted = _empty_invoice(parsed_document.file_name)
+            extracted.update(_extract_from_template(template_match.template, parsed_document.raw_text))
+            trace.append("Used learned template anchors because the document format looked familiar.")
+        else:
+            if not self._settings.openai_api_key:
+                trace.append("OPENAI_API_KEY not set, so the pipeline fell back to adaptive local extraction.")
+                return self._adaptive_local.extract_with_trace(parsed_document)
+
+            extracted = self._extract_with_llm(parsed_document)
+            trace.append("Used the LLM reasoning layer for an unseen or weakly matched document format.")
+
+        inferred = _infer_missing_fields(parsed_document.raw_text, extracted)
+        if inferred:
+            extracted.update(inferred)
+            trace.append(f"Inferred additional fields from semantic heuristics: {', '.join(sorted(inferred))}.")
+        else:
+            trace.append("No additional missing fields could be inferred.")
+
+        return extracted, trace
+
+    def _extract_with_llm(self, parsed_document: ParsedDocument) -> dict[str, Any]:
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ExtractionError("The `openai` package is not installed.") from exc
+
+        client = OpenAI(api_key=self._settings.openai_api_key)
+        prompt = (
+            "Extract invoice-style fields from the document text and return strict JSON with these keys: "
+            "document_type, source_file, vendor_name, invoice_number, invoice_date, due_date, "
+            "subtotal, tax, total_amount, currency. Use null for missing values. "
+            "If multiple field names are possible, choose the best business interpretation."
+        )
+
+        response = client.responses.create(
+            model=self._settings.openai_model,
+            input=[
+                {"role": "system", "content": "You convert unstructured business documents into structured invoice JSON."},
+                {"role": "user", "content": f"{prompt}\n\nDocument text:\n{parsed_document.raw_text[:18000]}"},
+            ],
+        )
+
+        content = getattr(response, "output_text", "").strip()
+        if not content:
+            raise ExtractionError("The LLM returned an empty response.")
+
+        content = _strip_json_fence(content)
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ExtractionError(f"LLM response was not valid JSON: {content}") from exc
+
+        extracted = _empty_invoice(parsed_document.file_name)
+        extracted.update(data)
+        extracted["document_type"] = extracted.get("document_type") or "invoice"
+        extracted["source_file"] = parsed_document.file_name
+
+        for money_field in ("subtotal", "tax", "total_amount"):
+            value = extracted.get(money_field)
+            if value in (None, ""):
+                extracted[money_field] = None
+                continue
+            try:
+                extracted[money_field] = float(str(value).replace(",", "").replace("$", ""))
+            except ValueError:
+                pass
+
+        return extracted
+
+
 def build_extractor(mode: str, settings: Settings) -> BaseExtractor:
     template_memory = TemplateMemory(settings.template_store_path)
     if mode == "template-only":
         return TemplateOnlyExtractor(template_memory)
     if mode == "rule-based":
         return RuleBasedInvoiceExtractor()
+    if mode == "llm-assisted":
+        return LLMAssistedInvoiceAgent(settings)
     return AdaptiveInvoiceAgent(settings)
 
 
@@ -213,3 +313,11 @@ def _infer_missing_fields(raw_text: str, extracted: dict[str, Any]) -> dict[str,
             inferred["invoice_date"] = match.group(1)
 
     return inferred
+
+
+def _strip_json_fence(content: str) -> str:
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
