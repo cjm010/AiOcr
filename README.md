@@ -238,3 +238,5 @@ More detail is documented in [docs/BRANCHING_AND_LEARNING_STRATEGY.md](C:/Users/
 - The current extraction logic is invoice-focused.
 - The adaptive learning layer is based on reusable memory, not full model retraining.
 - The design is intentionally modular so more document types and smarter extraction strategies can be added later.
+
+> Branch protection note: CI checks appear in GitHub after the workflow has run at least once on the branch.
