@@ -1,42 +1,30 @@
-# AI Document Extraction and Data Quality Platform
+# AI-Powered Data Quality Platform for Unstructured Data
 
-## Proprietary / Evaluation Notice
-
-This repository contains project materials created by student contributors for academic and evaluation purposes.
-
-No license is granted to use, copy, modify, distribute, deploy, commercialize, or create derivative works from this code or related materials unless a separate written agreement expressly grants those rights.
-
-Access to this repository or receipt of the code does not grant permission for production use, internal operational use, commercial use, redistribution, or sublicensing.
-
-All rights are reserved by the applicable rights holders, subject to any rights of The University of Texas at Dallas and any governing sponsor or university agreements.
-
-If you are a project sponsor or third party interested in evaluation or commercial use, contact the student team and the appropriate UTD office before using this software beyond review and evaluation.
-
-This repository contains a proof-of-concept system for extracting structured data from business documents such as invoices. The app accepts uploaded documents, parses them into text, extracts key fields, validates the results, lets a user correct anything that was missed, and stores the approved output for future reuse.
+This repository contains a proof-of-concept AI-driven data quality platform for unstructured data. The app ingests files such as PDFs and text documents, converts them into structured records, validates the outputs, supports human review and correction, and stores the approved results for downstream analytics and business use.
 
 At a high level, the solution follows this flow:
 
-`Upload document -> Parse document -> Extract fields -> Validate data -> Review corrections -> Store output -> Learn from approved results`
+`Upload document -> Parse unstructured content -> Extract and structure fields -> Validate data quality -> Review corrections -> Store output -> Learn from approved results`
 
 ## What This Solution Is
 
-This project is an open-source document extraction and data quality workflow built for demos, capstones, and early-stage prototypes. It is designed to show how a team can:
+This project is a graduate capstone prototype designed around the sponsor brief for an AI-powered data quality platform. It is intended to show how a team can:
 
 - ingest business documents through a simple UI
 - parse PDFs and text files into usable content
-- extract structured invoice fields
-- validate data quality with explicit business rules
+- convert unstructured inputs into structured datasets
+- validate data quality with explicit quality rules and profiling checks
 - support human-in-the-loop correction when extraction is incomplete
-- improve future results by learning reusable document patterns
+- improve future results by learning reusable document patterns and approved corrections
 
-The current implementation is focused on invoices, but the code is structured so the team can later add more document types such as contracts, agreements, or NDAs.
+The current prototype focuses on invoice-like documents as the first milestone, but the code is structured so the team can later expand to other unstructured sources such as reports, agreements, and domain-specific records.
 
 ## Core Capabilities
 
 - Streamlit web app for upload, review, and results
 - Open-source PDF/text parsing pipeline
-- Adaptive extraction with template memory and rule-based fallback
-- Validation for required fields, dates, and totals
+- Adaptive extraction with template memory, rule-based fallback, and LLM-ready extension points
+- Validation for required fields, dates, totals, and data-quality style checks
 - Human review workflow with PDF preview and copyable parsed text
 - Output persistence to JSON, CSV, SQLite, and extraction trace logs
 - Colab notebook version for portable demos and collaboration
@@ -58,9 +46,10 @@ The solution is made up of five main layers:
    - Checks template memory for similar previously approved documents
    - Reuses learned anchors when a match is found
    - Falls back to rule-based and heuristic extraction when no match exists
+   - Leaves a clean extension point for an LLM reasoning layer when the team is ready to add one
 
 4. Validation and Review Layer
-   - Validates required fields, dates, and totals
+   - Validates required fields, dates, totals, and structured output quality
    - Allows a user to inspect the source document and manually correct values
    - Re-runs validation on reviewed data
 
@@ -88,6 +77,7 @@ Adaptive Extraction Agent
   |----> Template Memory
   |----> Rule-Based Extraction
   |----> Heuristic Inference
+  |----> Optional LLM Reasoning Layer
   |
   v
 Structured Output
@@ -105,9 +95,16 @@ JSON / CSV / SQLite / Trace Output
 Learning Update into Template Memory
 ```
 
-## Learning Model Architecture
+## LLM and Learning Architecture
 
-The learning part of this solution does not retrain a large language model. Instead, it learns from approved document runs using adaptive memory.
+The current implementation does not retrain a large language model. Instead, it learns from approved document runs using adaptive memory and human-reviewed corrections.
+
+The LLM position in the target architecture is:
+
+- the LLM acts as a reasoning layer for tasks such as schema inference, extraction help, anomaly explanation, and metadata enrichment
+- the current codebase keeps that layer optional and pluggable
+- the current working prototype relies on adaptive local extraction, template memory, and heuristics first
+- this keeps the prototype affordable, explainable, and easy to demo while still matching the sponsor's end-state direction
 
 The system learns in three ways:
 
@@ -115,12 +112,12 @@ The system learns in three ways:
   - remembers top-line structure and key keywords from prior documents
 
 - template anchor learning
-  - remembers which labels and line patterns correspond to fields like vendor name, invoice date, and total amount
+  - remembers which labels and line patterns correspond to structured fields
 
 - human-reviewed feedback
   - if a user corrects extracted values, the approved output can be used to improve future matching and extraction behavior
 
-This means the solution gets better over time without requiring expensive model training infrastructure.
+This means the solution gets better over time without requiring expensive model training infrastructure during the capstone phase.
 
 ## Human Review Workflow
 
@@ -140,7 +137,7 @@ If no reliable match is found, or if extraction is incomplete, the user can ente
 - `src/doc_ai/config.py` - app settings and local paths
 - `src/doc_ai/pipeline.py` - end-to-end orchestration
 - `src/doc_ai/parsers.py` - PDF and text parsing
-- `src/doc_ai/extractors.py` - adaptive, template-based, and rule-based extraction
+- `src/doc_ai/extractors.py` - adaptive, template-based, and rule-based extraction logic
 - `src/doc_ai/validators.py` - data quality rules
 - `src/doc_ai/storage.py` - JSON, CSV, SQLite, and trace persistence
 - `src/doc_ai/schemas.py` - shared data structures
@@ -173,7 +170,7 @@ python -m streamlit run app.py
 
 ## Supported Inputs
 
-- PDF invoices
+- PDF invoices and similar unstructured business documents
 - `.txt` files
 - `.md` files
 - `.json` files
@@ -192,6 +189,8 @@ The app supports three extraction modes:
 
 - `rule-based`
   - uses regex and label-based extraction without adaptive memory
+
+These modes represent the current implementation. A future `llm-assisted` mode can be added on top of the same pipeline without changing the validation, review, storage, or promotion model.
 
 ## Environment Variables
 
@@ -247,8 +246,6 @@ More detail is documented in [docs/BRANCHING_AND_LEARNING_STRATEGY.md](C:/Users/
 ## Notes
 
 - This is a proof of concept, not a production-hardened system.
-- The current extraction logic is invoice-focused.
-- The adaptive learning layer is based on reusable memory, not full model retraining.
-- The design is intentionally modular so more document types and smarter extraction strategies can be added later.
-
-> Branch protection note: CI checks appear in GitHub after the workflow has run at least once on the branch.
+- The current extraction logic is invoice-focused because that is the first milestone and easiest demoable structured document type.
+- The adaptive learning layer is based on reusable memory and approved corrections, not full model retraining.
+- The design is intentionally modular so more document types, richer data-quality rules, OCR, and an LLM reasoning layer can be added later.
