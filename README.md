@@ -1,5 +1,17 @@
 # AI Document Extraction and Data Quality Platform
 
+## Proprietary / Evaluation Notice
+
+This repository contains project materials created by student contributors for academic and evaluation purposes.
+
+No license is granted to use, copy, modify, distribute, deploy, commercialize, or create derivative works from this code or related materials unless a separate written agreement expressly grants those rights.
+
+Access to this repository or receipt of the code does not grant permission for production use, internal operational use, commercial use, redistribution, or sublicensing.
+
+All rights are reserved by the applicable rights holders, subject to any rights of The University of Texas at Dallas and any governing sponsor or university agreements.
+
+If you are a project sponsor or third party interested in evaluation or commercial use, contact the student team and the appropriate UTD office before using this software beyond review and evaluation.
+
 This repository contains a proof-of-concept system for extracting structured data from business documents such as invoices. The app accepts uploaded documents, parses them into text, extracts key fields, validates the results, lets a user correct anything that was missed, and stores the approved output for future reuse.
 
 At a high level, the solution follows this flow:
