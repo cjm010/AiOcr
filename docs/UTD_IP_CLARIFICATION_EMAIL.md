@@ -6,6 +6,8 @@ Hello,
 
 I am a graduate student at The University of Texas at Dallas working on a sponsored project with other student contributors. The project has produced software code, architecture materials, and adaptive document-extraction workflows that may have potential value beyond the class deliverable.
 
+I reviewed the current course syllabus for BUAN/MIS 6399 and did not find any explicit language assigning intellectual property ownership of the software to the sponsor or otherwise clearly addressing ownership of student-created project code. Because of that, I would like to confirm the governing rule before any rights are granted or implied.
+
 Before we provide the sponsor with any broader rights to use, deploy, commercialize, or modify the software, we would like clarification on intellectual property ownership and licensing authority for this project.
 
 Could you please help us understand the following:
