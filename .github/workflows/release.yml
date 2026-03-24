@@ -1,0 +1,32 @@
+name: Release Gate
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  verify-main:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Production smoke check
+        env:
+          APP_ENV: prod
+          APP_DATA_DIR: data/prod
+          ENABLE_TEMPLATE_LEARNING: "false"
+        run: |
+          python -c "from src.doc_ai.config import get_settings; from src.doc_ai.pipeline import DocumentPipeline; s = get_settings(); DocumentPipeline(s); print('prod-ready', s.data_dir)"

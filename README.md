@@ -152,6 +152,13 @@ pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
+For environment-specific runs:
+
+```powershell
+$env:APP_ENV="dev"
+python -m streamlit run app.py
+```
+
 ## Supported Inputs
 
 - PDF invoices
@@ -176,6 +183,12 @@ The app supports three extraction modes:
 
 ## Environment Variables
 
+- `APP_ENV`
+  - identifies the running environment, such as `dev`, `test`, or `prod`
+
+- `APP_DATA_ROOT`
+  - base folder used to create isolated environment data directories
+
 - `APP_DATA_DIR`
   - overrides the local data directory
 
@@ -195,6 +208,29 @@ For each processed document, the system can produce:
 - extraction trace logs
 
 These outputs support demos, auditing, troubleshooting, and future expansion.
+
+## CI/CD and Environment Strategy
+
+This repo is set up for a three-environment flow:
+
+- `dev`
+- `test`
+- `main` as production
+
+GitHub Actions included in this repo:
+
+- `.github/workflows/ci.yml`
+  - runs dependency install, import smoke checks, and tests on pull requests and pushes
+
+- `.github/workflows/release.yml`
+  - runs a protected production smoke check on `main`
+
+- `.github/workflows/promote-learning.yml`
+  - manually promotes approved learning artifacts from `dev` or `test` into a higher environment
+
+The key policy is that learning artifacts must be isolated by environment and promoted intentionally. Development and test learning should never automatically overwrite production memory.
+
+More detail is documented in [docs/BRANCHING_AND_LEARNING_STRATEGY.md](C:/Users/colli/OneDrive/Documents/GitHub/AiOcr/docs/BRANCHING_AND_LEARNING_STRATEGY.md).
 
 ## Notes
 

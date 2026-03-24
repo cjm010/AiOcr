@@ -1,0 +1,45 @@
+name: Promote Learning Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_environment:
+        description: Source environment
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+      target_environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - test
+          - main
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target_environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Promote templates
+        run: |
+          python scripts/promote_learning_artifacts.py \
+            --source data/${{ inputs.source_environment }}/learned_templates.json \
+            --target data/${{ inputs.target_environment }}/promoted_templates.json
+
+      - name: Upload promoted artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: promoted-templates-${{ inputs.source_environment }}-to-${{ inputs.target_environment }}
+          path: data/${{ inputs.target_environment }}/promoted_templates.json
