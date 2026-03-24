@@ -23,7 +23,7 @@ The current prototype focuses on invoice-like documents as the first milestone, 
 
 - Streamlit web app for upload, review, and results
 - Open-source PDF/text parsing pipeline
-- Adaptive extraction with template memory, rule-based fallback, and LLM-ready extension points
+- Adaptive extraction with template memory, rule-based fallback, and optional LLM assistance for unfamiliar layouts
 - Validation for required fields, dates, totals, and data-quality style checks
 - Human review workflow with PDF preview and copyable parsed text
 - Output persistence to JSON, CSV, SQLite, and extraction trace logs
@@ -46,7 +46,7 @@ The solution is made up of five main layers:
    - Checks template memory for similar previously approved documents
    - Reuses learned anchors when a match is found
    - Falls back to rule-based and heuristic extraction when no match exists
-   - Leaves a clean extension point for an LLM reasoning layer when the team is ready to add one
+   - Uses an optional LLM reasoning layer when the document format is new or weakly matched
 
 4. Validation and Review Layer
    - Validates required fields, dates, totals, and structured output quality
@@ -77,7 +77,7 @@ Adaptive Extraction Agent
   |----> Template Memory
   |----> Rule-Based Extraction
   |----> Heuristic Inference
-  |----> Optional LLM Reasoning Layer
+  |----> Optional LLM Reasoning Layer for Unfamiliar Formats
   |
   v
 Structured Output
@@ -97,14 +97,22 @@ Learning Update into Template Memory
 
 ## LLM and Learning Architecture
 
-The current implementation does not retrain a large language model. Instead, it learns from approved document runs using adaptive memory and human-reviewed corrections.
+The current implementation can use an LLM-assisted extraction path for unfamiliar invoice formats while still keeping human review in the loop. The system does not retrain or fine-tune the foundation model. Instead, it learns from approved document runs using adaptive memory and human-reviewed corrections.
 
 The LLM position in the target architecture is:
 
 - the LLM acts as a reasoning layer for tasks such as schema inference, extraction help, anomaly explanation, and metadata enrichment
-- the current codebase keeps that layer optional and pluggable
-- the current working prototype relies on adaptive local extraction, template memory, and heuristics first
-- this keeps the prototype affordable, explainable, and easy to demo while still matching the sponsor's end-state direction
+- the system first checks whether a document layout looks familiar
+- for familiar layouts, it uses learned templates or local extraction logic
+- for unfamiliar layouts, the `llm-assisted` mode can call an LLM to interpret the document text and return structured JSON
+- after that, the same validation, review, and persistence layers still apply
+
+This means:
+
+- the LLM helps accelerate extraction for new invoice formats
+- the reviewer still decides whether the extracted elements are correct
+- approved corrections improve future behavior through template memory
+- the current project does **not** train the base LLM itself
 
 The system learns in three ways:
 
@@ -117,7 +125,7 @@ The system learns in three ways:
 - human-reviewed feedback
   - if a user corrects extracted values, the approved output can be used to improve future matching and extraction behavior
 
-This means the solution gets better over time without requiring expensive model training infrastructure during the capstone phase.
+This means the solution gets better over time without requiring model fine-tuning infrastructure during the capstone phase.
 
 ## Human Review Workflow
 
@@ -181,6 +189,9 @@ Best results come from text-based PDFs. If a PDF does not contain a readable tex
 
 The app supports three extraction modes:
 
+- `llm-assisted`
+  - uses the LLM reasoning layer when the document format looks unfamiliar, then applies the normal validation and review flow
+
 - `adaptive-local`
   - tries learned templates first, then falls back to rule-based and heuristic extraction
 
@@ -190,7 +201,7 @@ The app supports three extraction modes:
 - `rule-based`
   - uses regex and label-based extraction without adaptive memory
 
-These modes represent the current implementation. A future `llm-assisted` mode can be added on top of the same pipeline without changing the validation, review, storage, or promotion model.
+These modes represent the current implementation. The recommended choice for new invoice layouts is `llm-assisted`, while `adaptive-local` remains the lowest-cost option for repeated or well-known formats.
 
 ## Environment Variables
 
@@ -208,6 +219,12 @@ These modes represent the current implementation. A future `llm-assisted` mode c
 
 - `MIN_LEARNING_PASS_RATIO`
   - sets the minimum validation pass ratio required before a new template is saved
+
+- `OPENAI_API_KEY`
+  - enables the LLM-assisted extraction path
+
+- `OPENAI_MODEL`
+  - selects the model used for `llm-assisted` extraction
 
 ## Output Artifacts
 
@@ -248,4 +265,5 @@ More detail is documented in [docs/BRANCHING_AND_LEARNING_STRATEGY.md](C:/Users/
 - This is a proof of concept, not a production-hardened system.
 - The current extraction logic is invoice-focused because that is the first milestone and easiest demoable structured document type.
 - The adaptive learning layer is based on reusable memory and approved corrections, not full model retraining.
+- LLM-assisted extraction is best used for unseen or weakly matched invoice formats, with a reviewer confirming the extracted elements before they are trusted.
 - The design is intentionally modular so more document types, richer data-quality rules, OCR, and an LLM reasoning layer can be added later.

@@ -2,6 +2,7 @@ streamlit>=1.42.0
 pandas>=2.2.0
 pydantic>=2.10.0
 python-dotenv>=1.0.1
+openai>=1.68.0
 
 # Optional parsing helpers
 unstructured[pdf]>=0.16.11

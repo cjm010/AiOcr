@@ -120,9 +120,9 @@ def main() -> None:
         st.subheader("Pipeline settings")
         extraction_mode = st.selectbox(
             "Extraction mode",
-            options=["adaptive-local", "template-only", "rule-based"],
+            options=["llm-assisted", "adaptive-local", "template-only", "rule-based"],
             index=0,
-            help="Use adaptive local extraction, only learned templates, or a fixed rules baseline. A future LLM reasoning layer can plug into the same pipeline.",
+            help="Use an LLM for unfamiliar formats, adaptive local extraction, only learned templates, or a fixed rules baseline.",
         )
         learn_from_upload = st.checkbox(
             "Learn from successful uploads",
@@ -130,7 +130,11 @@ def main() -> None:
             help="Stores reusable anchors from high-quality runs so similar future documents are easier to parse.",
         )
         st.write(f"Data directory: `{settings.data_dir}`")
-        st.caption("Adaptive learning updates local template memory. It does not retrain a foundation model.")
+        if extraction_mode == "llm-assisted" and not settings.openai_api_key:
+            st.warning("`OPENAI_API_KEY` is not set. `llm-assisted` mode will fall back to adaptive local extraction.")
+        st.caption(
+            "Approved corrections improve template memory and extraction behavior. They do not fine-tune the foundation model."
+        )
 
     uploaded_file = st.file_uploader(
         "Upload an invoice or similar unstructured business document",
