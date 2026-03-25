@@ -113,6 +113,8 @@ This means:
 - the reviewer still decides whether the extracted elements are correct
 - approved corrections improve future behavior through template memory
 - the current project does **not** train the base LLM itself
+- repeated runs become more stable once a user approves a correct result for future matching
+- unreviewed `llm-assisted` runs do not automatically update template memory
 
 The system learns in three ways:
 
@@ -138,6 +140,12 @@ After processing a document, the app provides:
 - a correction form for manual edits
 
 If no reliable match is found, or if extraction is incomplete, the user can enter the correct data directly. The approved data is then saved and can contribute to future template learning when validation quality is high enough.
+
+For stronger consistency on repeated uploads of the same format:
+
+- the LLM now uses a stricter JSON-only extraction request
+- the app reuses learned templates sooner when the document layout is similar, but falls back to the LLM if the template result is too incomplete
+- a user can explicitly approve either the current extracted result or a reviewed correction for future matching
 
 ## Project Layout
 
@@ -176,6 +184,11 @@ $env:APP_ENV="dev"
 python -m streamlit run app.py
 ```
 
+If you want to use `llm-assisted` mode, you can either:
+
+- enter your provider API key and choose a model directly in the Streamlit sidebar, or
+- set `LLM_PROVIDER`, `OPENAI_API_KEY`, and `OPENAI_MODEL` in your local environment or `.env`
+
 ## Supported Inputs
 
 - PDF invoices and similar unstructured business documents
@@ -203,6 +216,27 @@ The app supports three extraction modes:
 
 These modes represent the current implementation. The recommended choice for new invoice layouts is `llm-assisted`, while `adaptive-local` remains the lowest-cost option for repeated or well-known formats.
 
+When `llm-assisted` is selected, the UI lets a user:
+
+- choose a provider such as OpenAI, Groq, OpenRouter, or Ollama
+- paste an API key for the current session when the provider needs one
+- choose a recommended model from the sidebar
+- enter a custom model id when needed
+- override the base URL for a compatible hosted or local endpoint
+
+The API key entered in the UI is kept only in the active Streamlit session. It is not written to repository files, output artifacts, or the learned template store.
+
+For free testing, the easiest options are usually:
+
+- `Groq`
+  - fast hosted inference with a free developer tier
+
+- `OpenRouter`
+  - good for trying free-model variants behind one API
+
+- `Ollama`
+  - fully local testing with no per-call cost if you have the hardware
+
 ## Environment Variables
 
 - `APP_ENV`
@@ -220,11 +254,17 @@ These modes represent the current implementation. The recommended choice for new
 - `MIN_LEARNING_PASS_RATIO`
   - sets the minimum validation pass ratio required before a new template is saved
 
+- `LLM_PROVIDER`
+  - chooses the default LLM provider, such as `openai`, `groq`, `openrouter`, or `ollama`
+
+- `LLM_BASE_URL`
+  - optionally overrides the provider default endpoint for a compatible hosted or local API
+
 - `OPENAI_API_KEY`
-  - enables the LLM-assisted extraction path
+  - optionally enables the LLM-assisted extraction path when you do not want to enter the key in the UI
 
 - `OPENAI_MODEL`
-  - selects the model used for `llm-assisted` extraction
+  - sets the default model used for `llm-assisted` extraction when a different model is not selected in the UI
 
 ## Output Artifacts
 

@@ -167,10 +167,17 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
             trace.append("No learned template candidates were available yet.")
 
         # For familiar layouts, keep the faster local path.
-        if template_match and template_match.score >= 0.75:
+        if template_match and template_match.score >= 0.68:
             extracted = _empty_invoice(parsed_document.file_name)
             extracted.update(_extract_from_template(template_match.template, parsed_document.raw_text))
-            trace.append("Used learned template anchors because the document format looked familiar.")
+            trace.append("Used learned template anchors because the document format looked familiar enough.")
+            if _needs_llm_fallback(extracted):
+                trace.append("Template extraction was too incomplete, so the pipeline fell back to the LLM.")
+                if not self._settings.openai_api_key:
+                    trace.append("No API key was available for LLM fallback, so incomplete template output was kept.")
+                else:
+                    extracted = self._extract_with_llm(parsed_document)
+                    trace.append("Used the LLM reasoning layer after incomplete template extraction.")
         else:
             if not self._settings.openai_api_key:
                 trace.append("OPENAI_API_KEY not set, so the pipeline fell back to adaptive local extraction.")
@@ -194,27 +201,34 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
         except ImportError as exc:
             raise ExtractionError("The `openai` package is not installed.") from exc
 
-        client = OpenAI(api_key=self._settings.openai_api_key)
+        client = self._build_client(OpenAI)
         prompt = (
-            "Extract invoice-style fields from the document text and return strict JSON with these keys: "
+            "Extract invoice fields from the document text and return one JSON object only. "
+            "Use exactly these keys and no others: "
             "document_type, source_file, vendor_name, invoice_number, invoice_date, due_date, "
-            "subtotal, tax, total_amount, currency. Use null for missing values. "
-            "If multiple field names are possible, choose the best business interpretation."
+            "subtotal, tax, total_amount, currency. "
+            "Use null for missing values. "
+            "Set document_type to invoice unless the text clearly shows otherwise. "
+            "Dates should be normalized to YYYY-MM-DD when possible. "
+            "Monetary values should be numbers, not strings with currency symbols. "
+            "Do not wrap the JSON in markdown."
         )
 
-        response = client.responses.create(
-            model=self._settings.openai_model,
-            input=[
-                {"role": "system", "content": "You convert unstructured business documents into structured invoice JSON."},
-                {"role": "user", "content": f"{prompt}\n\nDocument text:\n{parsed_document.raw_text[:18000]}"},
-            ],
-        )
-
-        content = getattr(response, "output_text", "").strip()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You convert unstructured business documents into structured invoice JSON. "
+                    "Return valid JSON only."
+                ),
+            },
+            {"role": "user", "content": f"{prompt}\n\nDocument text:\n{parsed_document.raw_text[:18000]}"},
+        ]
+        content = self._request_llm_json(client, messages)
         if not content:
             raise ExtractionError("The LLM returned an empty response.")
 
-        content = _strip_json_fence(content)
+        content = _extract_json_object(_strip_json_fence(content))
         try:
             data = json.loads(content)
         except json.JSONDecodeError as exc:
@@ -236,6 +250,58 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
                 pass
 
         return extracted
+
+    def _request_llm_json(self, client, messages: list[dict[str, str]]) -> str:
+        request = {
+            "model": self._settings.openai_model,
+            "messages": messages,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            response = client.chat.completions.create(**request)
+        except TypeError:
+            request.pop("response_format", None)
+            try:
+                response = client.chat.completions.create(**request)
+            except TypeError:
+                request.pop("temperature", None)
+                response = client.chat.completions.create(**request)
+
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            return ""
+
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", "")
+        if isinstance(content, list):
+            return "".join(part.get("text", "") for part in content if isinstance(part, dict)).strip()
+        return str(content).strip()
+
+    def _build_client(self, openai_cls):
+        provider = (self._settings.llm_provider or "openai").strip().lower()
+        base_url = self._settings.llm_base_url
+        api_key = self._settings.openai_api_key
+
+        if provider == "groq":
+            return openai_cls(
+                api_key=api_key,
+                base_url=base_url or "https://api.groq.com/openai/v1",
+            )
+        if provider == "openrouter":
+            return openai_cls(
+                api_key=api_key,
+                base_url=base_url or "https://openrouter.ai/api/v1",
+            )
+        if provider == "ollama":
+            return openai_cls(
+                api_key=api_key or "ollama",
+                base_url=base_url or "http://localhost:11434/v1/",
+            )
+        return openai_cls(
+            api_key=api_key,
+            base_url=base_url,
+        )
 
 
 def build_extractor(mode: str, settings: Settings) -> BaseExtractor:
@@ -315,9 +381,23 @@ def _infer_missing_fields(raw_text: str, extracted: dict[str, Any]) -> dict[str,
     return inferred
 
 
+def _needs_llm_fallback(extracted: dict[str, Any]) -> bool:
+    required_fields = ("vendor_name", "invoice_number", "invoice_date", "total_amount")
+    missing_required = sum(1 for field in required_fields if extracted.get(field) in (None, "", []))
+    return missing_required >= 1
+
+
 def _strip_json_fence(content: str) -> str:
     cleaned = content.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
     return cleaned.strip()
+
+
+def _extract_json_object(content: str) -> str:
+    start = content.find("{")
+    end = content.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return content.strip()
+    return content[start : end + 1].strip()

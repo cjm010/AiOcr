@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import base64
+import hashlib
 import json
+from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from src.doc_ai.config import get_settings
 from src.doc_ai.pipeline import DocumentPipeline
@@ -30,6 +31,42 @@ FIELD_ORDER = [
     "currency",
 ]
 
+LLM_PROVIDER_OPTIONS = ["openai", "groq", "openrouter", "ollama"]
+
+MODEL_OPTIONS_BY_PROVIDER = {
+    "openai": ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o", "custom"],
+    "groq": ["openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "custom"],
+    "openrouter": [
+        "openai/gpt-oss-20b:free",
+        "meta-llama/llama-3.3-8b-instruct:free",
+        "google/gemma-3-27b-it:free",
+        "custom",
+    ],
+    "ollama": ["llama3.2", "mistral", "qwen2.5", "custom"],
+}
+
+
+@st.cache_data(show_spinner=False)
+def render_pdf_pages(upload_path: str) -> list[bytes]:
+    path = Path(upload_path)
+    if not path.exists() or path.suffix.lower() != ".pdf":
+        return []
+
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(str(path))
+    pages: list[bytes] = []
+    for page_index in range(len(document)):
+        page = document[page_index]
+        bitmap = page.render(scale=1.5)
+        image = bitmap.to_pil()
+        with BytesIO() as buffer:
+            image.save(buffer, format="PNG")
+            pages.append(buffer.getvalue())
+        page.close()
+    document.close()
+    return pages
+
 
 def render_pdf_preview(upload_path: str) -> None:
     path = Path(upload_path)
@@ -37,16 +74,34 @@ def render_pdf_preview(upload_path: str) -> None:
         st.info("PDF preview is only available for uploaded PDF files.")
         return
 
-    encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
-    pdf_html = f"""
-    <iframe
-        src="data:application/pdf;base64,{encoded}#toolbar=1&navpanes=0&scrollbar=1"
-        width="100%"
-        height="720"
-        style="border: 1px solid #d9d9d9; border-radius: 8px;"
-    ></iframe>
-    """
-    components.html(pdf_html, height=740, scrolling=True)
+    try:
+        page_images = render_pdf_pages(upload_path)
+    except Exception as exc:
+        st.warning(f"PDF preview could not be rendered in-app: {exc}")
+        st.download_button(
+            "Download PDF",
+            data=path.read_bytes(),
+            file_name=path.name,
+            mime="application/pdf",
+            use_container_width=True,
+        )
+        return
+
+    if not page_images:
+        st.info("This PDF could not be rendered for preview.")
+        return
+
+    st.caption("Preview is rendered as images so it works reliably in the browser.")
+    for index, image_bytes in enumerate(page_images, start=1):
+        st.image(image_bytes, caption=f"Page {index}", use_container_width=True)
+
+    st.download_button(
+        "Download original PDF",
+        data=path.read_bytes(),
+        file_name=path.name,
+        mime="application/pdf",
+        use_container_width=True,
+    )
 
 
 def coerce_form_data(source_file: str, values: dict[str, str]) -> dict[str, object]:
@@ -90,6 +145,12 @@ def render_review_form(
                     value="" if current is None else str(current),
                 )
 
+        approve_for_future_matching = st.checkbox(
+            "Approve this reviewed result for future matching",
+            value=True,
+            help="If checked, the reviewed values will be saved as a stronger template for similar future documents.",
+        )
+
         submitted = st.form_submit_button("Save reviewed result", type="primary")
 
     if submitted:
@@ -101,15 +162,66 @@ def render_review_form(
             corrected_data=corrected_data,
             extraction_mode=extraction_mode,
             learn_from_upload=learn_from_upload,
+            approve_for_future_matching=approve_for_future_matching,
         )
         st.session_state["last_result"] = reviewed_result
         st.success("Reviewed values saved. The outputs and validation report have been updated.")
         st.rerun()
 
 
+def render_approval_actions(
+    pipeline: DocumentPipeline,
+    result,
+    extraction_mode: str,
+    learn_from_upload: bool,
+) -> None:
+    st.subheader("Approve current result")
+    st.caption("If these extracted values already look right, approve them so the system reuses this format next time.")
+
+    if st.button("Approve current result for future matching", use_container_width=True):
+        reviewed_result = pipeline.finalize_review(
+            source_file=result.source_file,
+            upload_path=result.upload_path,
+            parsed_text=result.parsed_text,
+            corrected_data=result.extracted_data,
+            extraction_mode=extraction_mode,
+            learn_from_upload=learn_from_upload,
+            approve_for_future_matching=True,
+        )
+        st.session_state["last_result"] = reviewed_result
+        st.success("This result was approved and saved for stronger future matching.")
+        st.rerun()
+
+
+def resolve_runtime_settings(base_settings):
+    ui_api_key = st.session_state.get("ui_openai_api_key", "").strip()
+    custom_model = st.session_state.get("ui_openai_custom_model", "").strip()
+    selected_model = st.session_state.get("ui_openai_model", base_settings.openai_model)
+    provider = st.session_state.get("ui_llm_provider", base_settings.llm_provider)
+    custom_base_url = st.session_state.get("ui_llm_base_url", "").strip()
+
+    if selected_model == "custom":
+        runtime_model = custom_model or base_settings.openai_model
+    else:
+        runtime_model = selected_model
+    runtime_api_key = ui_api_key or base_settings.openai_api_key
+
+    return replace(
+        base_settings,
+        llm_provider=provider,
+        llm_base_url=custom_base_url or base_settings.llm_base_url,
+        openai_api_key=runtime_api_key,
+        openai_model=runtime_model or base_settings.openai_model,
+    )
+
+
+def compute_upload_signature(file_name: str, file_bytes: bytes) -> str:
+    digest = hashlib.sha256(file_bytes).hexdigest()
+    return f"{file_name}:{len(file_bytes)}:{digest}"
+
+
 def main() -> None:
     settings = get_settings()
-    pipeline = DocumentPipeline(settings)
 
     st.title("AI-Powered Data Quality Platform for Unstructured Data")
     st.caption(
@@ -130,11 +242,63 @@ def main() -> None:
             help="Stores reusable anchors from high-quality runs so similar future documents are easier to parse.",
         )
         st.write(f"Data directory: `{settings.data_dir}`")
-        if extraction_mode == "llm-assisted" and not settings.openai_api_key:
-            st.warning("`OPENAI_API_KEY` is not set. `llm-assisted` mode will fall back to adaptive local extraction.")
+        if extraction_mode == "llm-assisted":
+            st.markdown("**LLM settings**")
+            provider_index = (
+                LLM_PROVIDER_OPTIONS.index(settings.llm_provider)
+                if settings.llm_provider in LLM_PROVIDER_OPTIONS
+                else 0
+            )
+            provider = st.selectbox(
+                "LLM provider",
+                options=LLM_PROVIDER_OPTIONS,
+                key="ui_llm_provider",
+                index=provider_index,
+                help="Choose the provider used for llm-assisted extraction.",
+            )
+            model_options = MODEL_OPTIONS_BY_PROVIDER.get(provider, ["custom"])
+            current_model = st.session_state.get("ui_openai_model")
+            if current_model not in model_options:
+                st.session_state["ui_openai_model"] = model_options[0]
+            st.text_input(
+                "API key",
+                key="ui_openai_api_key",
+                type="password",
+                placeholder="sk-... or provider key",
+                help="Stored only in this browser session and never written to project files or outputs.",
+            )
+            st.selectbox(
+                "Model",
+                options=model_options,
+                key="ui_openai_model",
+                index=0,
+                help="Choose a recommended model for the selected provider or select custom to enter another model id.",
+            )
+            if st.session_state.get("ui_openai_model") == "custom":
+                st.text_input(
+                    "Custom model id",
+                    key="ui_openai_custom_model",
+                    placeholder="gpt-4.1-mini",
+                )
+            st.text_input(
+                "Custom base URL (optional)",
+                key="ui_llm_base_url",
+                placeholder="Leave blank to use the provider default",
+                help="Useful for self-hosted or compatible gateways. Ollama defaults to http://localhost:11434/v1/.",
+            )
+            if st.button("Clear API key", use_container_width=True):
+                st.session_state["ui_openai_api_key"] = ""
+                st.rerun()
+            st.caption("Your API key is used only for the current Streamlit session.")
         st.caption(
             "Approved corrections improve template memory and extraction behavior. They do not fine-tune the foundation model."
         )
+
+    runtime_settings = resolve_runtime_settings(settings)
+    pipeline = DocumentPipeline(runtime_settings)
+
+    if extraction_mode == "llm-assisted" and runtime_settings.llm_provider != "ollama" and not runtime_settings.openai_api_key:
+        st.warning("No API key is active for the selected provider. `llm-assisted` mode will fall back to adaptive local extraction.")
 
     uploaded_file = st.file_uploader(
         "Upload an invoice or similar unstructured business document",
@@ -162,6 +326,15 @@ def main() -> None:
             )
         return
 
+    uploaded_bytes = uploaded_file.getvalue()
+    current_upload_signature = compute_upload_signature(uploaded_file.name, uploaded_bytes)
+    previous_upload_signature = st.session_state.get("current_upload_signature")
+    if previous_upload_signature != current_upload_signature:
+        st.session_state["current_upload_signature"] = current_upload_signature
+        if st.session_state.get("last_processed_signature") != current_upload_signature:
+            st.session_state.pop("last_result", None)
+            st.session_state.pop("last_uploaded_name", None)
+
     if st.button("Process document", type="primary"):
         try:
             with st.spinner("Running parsing, extraction, validation, and storage..."):
@@ -175,12 +348,13 @@ def main() -> None:
             st.stop()
         st.session_state["last_result"] = result
         st.session_state["last_uploaded_name"] = uploaded_file.name
+        st.session_state["last_processed_signature"] = current_upload_signature
 
     result = st.session_state.get("last_result")
     if not result:
         return
 
-    if st.session_state.get("last_uploaded_name") != uploaded_file.name:
+    if st.session_state.get("last_processed_signature") != current_upload_signature:
         st.info("Press `Process document` to run the pipeline for the currently selected file.")
         return
 
@@ -204,6 +378,7 @@ def main() -> None:
     with review_col:
         st.subheader("Current extracted fields")
         st.json(result.extracted_data)
+        render_approval_actions(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
         st.subheader("Validation report")
         validation_df = pd.DataFrame(result.validation_results)
         if validation_df.empty:
