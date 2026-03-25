@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -28,6 +29,14 @@ FIELD_ORDER = [
     "tax",
     "total_amount",
     "currency",
+]
+
+OPENAI_MODEL_OPTIONS = [
+    "gpt-4.1-mini",
+    "gpt-4.1",
+    "gpt-4o-mini",
+    "gpt-4o",
+    "custom",
 ]
 
 
@@ -107,9 +116,26 @@ def render_review_form(
         st.rerun()
 
 
+def resolve_runtime_settings(base_settings):
+    ui_api_key = st.session_state.get("ui_openai_api_key", "").strip()
+    custom_model = st.session_state.get("ui_openai_custom_model", "").strip()
+    selected_model = st.session_state.get("ui_openai_model", base_settings.openai_model)
+
+    if selected_model == "custom":
+        runtime_model = custom_model or base_settings.openai_model
+    else:
+        runtime_model = selected_model
+    runtime_api_key = ui_api_key or base_settings.openai_api_key
+
+    return replace(
+        base_settings,
+        openai_api_key=runtime_api_key,
+        openai_model=runtime_model or base_settings.openai_model,
+    )
+
+
 def main() -> None:
     settings = get_settings()
-    pipeline = DocumentPipeline(settings)
 
     st.title("AI-Powered Data Quality Platform for Unstructured Data")
     st.caption(
@@ -130,11 +156,41 @@ def main() -> None:
             help="Stores reusable anchors from high-quality runs so similar future documents are easier to parse.",
         )
         st.write(f"Data directory: `{settings.data_dir}`")
-        if extraction_mode == "llm-assisted" and not settings.openai_api_key:
-            st.warning("`OPENAI_API_KEY` is not set. `llm-assisted` mode will fall back to adaptive local extraction.")
+        if extraction_mode == "llm-assisted":
+            st.markdown("**OpenAI settings**")
+            st.text_input(
+                "OpenAI API key",
+                key="ui_openai_api_key",
+                type="password",
+                placeholder="sk-...",
+                help="Stored only in this browser session and never written to project files or outputs.",
+            )
+            st.selectbox(
+                "OpenAI model",
+                options=OPENAI_MODEL_OPTIONS,
+                key="ui_openai_model",
+                index=0,
+                help="Choose a recommended model or select custom to enter another model id.",
+            )
+            if st.session_state.get("ui_openai_model") == "custom":
+                st.text_input(
+                    "Custom model id",
+                    key="ui_openai_custom_model",
+                    placeholder="gpt-4.1-mini",
+                )
+            if st.button("Clear OpenAI key", use_container_width=True):
+                st.session_state["ui_openai_api_key"] = ""
+                st.rerun()
+            st.caption("Your API key is used only for the current Streamlit session.")
         st.caption(
             "Approved corrections improve template memory and extraction behavior. They do not fine-tune the foundation model."
         )
+
+    runtime_settings = resolve_runtime_settings(settings)
+    pipeline = DocumentPipeline(runtime_settings)
+
+    if extraction_mode == "llm-assisted" and not runtime_settings.openai_api_key:
+        st.warning("No OpenAI API key is active. `llm-assisted` mode will fall back to adaptive local extraction.")
 
     uploaded_file = st.file_uploader(
         "Upload an invoice or similar unstructured business document",

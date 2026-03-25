@@ -176,6 +176,11 @@ $env:APP_ENV="dev"
 python -m streamlit run app.py
 ```
 
+If you want to use `llm-assisted` mode, you can either:
+
+- enter your OpenAI API key and choose a model directly in the Streamlit sidebar, or
+- set `OPENAI_API_KEY` and `OPENAI_MODEL` in your local environment or `.env`
+
 ## Supported Inputs
 
 - PDF invoices and similar unstructured business documents
@@ -203,6 +208,14 @@ The app supports three extraction modes:
 
 These modes represent the current implementation. The recommended choice for new invoice layouts is `llm-assisted`, while `adaptive-local` remains the lowest-cost option for repeated or well-known formats.
 
+When `llm-assisted` is selected, the UI lets a user:
+
+- paste an OpenAI API key for the current session
+- choose a recommended model from the sidebar
+- enter a custom model id when needed
+
+The API key entered in the UI is kept only in the active Streamlit session. It is not written to repository files, output artifacts, or the learned template store.
+
 ## Environment Variables
 
 - `APP_ENV`
@@ -221,10 +234,10 @@ These modes represent the current implementation. The recommended choice for new
   - sets the minimum validation pass ratio required before a new template is saved
 
 - `OPENAI_API_KEY`
-  - enables the LLM-assisted extraction path
+  - optionally enables the LLM-assisted extraction path when you do not want to enter the key in the UI
 
 - `OPENAI_MODEL`
-  - selects the model used for `llm-assisted` extraction
+  - sets the default model used for `llm-assisted` extraction when a different model is not selected in the UI
 
 ## Output Artifacts
 
