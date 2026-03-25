@@ -194,7 +194,7 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
         except ImportError as exc:
             raise ExtractionError("The `openai` package is not installed.") from exc
 
-        client = OpenAI(api_key=self._settings.openai_api_key)
+        client = self._build_client(OpenAI)
         prompt = (
             "Extract invoice-style fields from the document text and return strict JSON with these keys: "
             "document_type, source_file, vendor_name, invoice_number, invoice_date, due_date, "
@@ -236,6 +236,31 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
                 pass
 
         return extracted
+
+    def _build_client(self, openai_cls):
+        provider = (self._settings.llm_provider or "openai").strip().lower()
+        base_url = self._settings.llm_base_url
+        api_key = self._settings.openai_api_key
+
+        if provider == "groq":
+            return openai_cls(
+                api_key=api_key,
+                base_url=base_url or "https://api.groq.com/openai/v1",
+            )
+        if provider == "openrouter":
+            return openai_cls(
+                api_key=api_key,
+                base_url=base_url or "https://openrouter.ai/api/v1",
+            )
+        if provider == "ollama":
+            return openai_cls(
+                api_key=api_key or "ollama",
+                base_url=base_url or "http://localhost:11434/v1/",
+            )
+        return openai_cls(
+            api_key=api_key,
+            base_url=base_url,
+        )
 
 
 def build_extractor(mode: str, settings: Settings) -> BaseExtractor:

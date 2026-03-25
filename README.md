@@ -178,8 +178,8 @@ python -m streamlit run app.py
 
 If you want to use `llm-assisted` mode, you can either:
 
-- enter your OpenAI API key and choose a model directly in the Streamlit sidebar, or
-- set `OPENAI_API_KEY` and `OPENAI_MODEL` in your local environment or `.env`
+- enter your provider API key and choose a model directly in the Streamlit sidebar, or
+- set `LLM_PROVIDER`, `OPENAI_API_KEY`, and `OPENAI_MODEL` in your local environment or `.env`
 
 ## Supported Inputs
 
@@ -210,11 +210,24 @@ These modes represent the current implementation. The recommended choice for new
 
 When `llm-assisted` is selected, the UI lets a user:
 
-- paste an OpenAI API key for the current session
+- choose a provider such as OpenAI, Groq, OpenRouter, or Ollama
+- paste an API key for the current session when the provider needs one
 - choose a recommended model from the sidebar
 - enter a custom model id when needed
+- override the base URL for a compatible hosted or local endpoint
 
 The API key entered in the UI is kept only in the active Streamlit session. It is not written to repository files, output artifacts, or the learned template store.
+
+For free testing, the easiest options are usually:
+
+- `Groq`
+  - fast hosted inference with a free developer tier
+
+- `OpenRouter`
+  - good for trying free-model variants behind one API
+
+- `Ollama`
+  - fully local testing with no per-call cost if you have the hardware
 
 ## Environment Variables
 
@@ -232,6 +245,12 @@ The API key entered in the UI is kept only in the active Streamlit session. It i
 
 - `MIN_LEARNING_PASS_RATIO`
   - sets the minimum validation pass ratio required before a new template is saved
+
+- `LLM_PROVIDER`
+  - chooses the default LLM provider, such as `openai`, `groq`, `openrouter`, or `ollama`
+
+- `LLM_BASE_URL`
+  - optionally overrides the provider default endpoint for a compatible hosted or local API
 
 - `OPENAI_API_KEY`
   - optionally enables the LLM-assisted extraction path when you do not want to enter the key in the UI

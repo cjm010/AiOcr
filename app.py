@@ -31,13 +31,19 @@ FIELD_ORDER = [
     "currency",
 ]
 
-OPENAI_MODEL_OPTIONS = [
-    "gpt-4.1-mini",
-    "gpt-4.1",
-    "gpt-4o-mini",
-    "gpt-4o",
-    "custom",
-]
+LLM_PROVIDER_OPTIONS = ["openai", "groq", "openrouter", "ollama"]
+
+MODEL_OPTIONS_BY_PROVIDER = {
+    "openai": ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o", "custom"],
+    "groq": ["openai/gpt-oss-20b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "custom"],
+    "openrouter": [
+        "openai/gpt-oss-20b:free",
+        "meta-llama/llama-3.3-8b-instruct:free",
+        "google/gemma-3-27b-it:free",
+        "custom",
+    ],
+    "ollama": ["llama3.2", "mistral", "qwen2.5", "custom"],
+}
 
 
 def render_pdf_preview(upload_path: str) -> None:
@@ -120,6 +126,8 @@ def resolve_runtime_settings(base_settings):
     ui_api_key = st.session_state.get("ui_openai_api_key", "").strip()
     custom_model = st.session_state.get("ui_openai_custom_model", "").strip()
     selected_model = st.session_state.get("ui_openai_model", base_settings.openai_model)
+    provider = st.session_state.get("ui_llm_provider", base_settings.llm_provider)
+    custom_base_url = st.session_state.get("ui_llm_base_url", "").strip()
 
     if selected_model == "custom":
         runtime_model = custom_model or base_settings.openai_model
@@ -129,6 +137,8 @@ def resolve_runtime_settings(base_settings):
 
     return replace(
         base_settings,
+        llm_provider=provider,
+        llm_base_url=custom_base_url or base_settings.llm_base_url,
         openai_api_key=runtime_api_key,
         openai_model=runtime_model or base_settings.openai_model,
     )
@@ -157,20 +167,36 @@ def main() -> None:
         )
         st.write(f"Data directory: `{settings.data_dir}`")
         if extraction_mode == "llm-assisted":
-            st.markdown("**OpenAI settings**")
+            st.markdown("**LLM settings**")
+            provider_index = (
+                LLM_PROVIDER_OPTIONS.index(settings.llm_provider)
+                if settings.llm_provider in LLM_PROVIDER_OPTIONS
+                else 0
+            )
+            provider = st.selectbox(
+                "LLM provider",
+                options=LLM_PROVIDER_OPTIONS,
+                key="ui_llm_provider",
+                index=provider_index,
+                help="Choose the provider used for llm-assisted extraction.",
+            )
+            model_options = MODEL_OPTIONS_BY_PROVIDER.get(provider, ["custom"])
+            current_model = st.session_state.get("ui_openai_model")
+            if current_model not in model_options:
+                st.session_state["ui_openai_model"] = model_options[0]
             st.text_input(
-                "OpenAI API key",
+                "API key",
                 key="ui_openai_api_key",
                 type="password",
-                placeholder="sk-...",
+                placeholder="sk-... or provider key",
                 help="Stored only in this browser session and never written to project files or outputs.",
             )
             st.selectbox(
-                "OpenAI model",
-                options=OPENAI_MODEL_OPTIONS,
+                "Model",
+                options=model_options,
                 key="ui_openai_model",
                 index=0,
-                help="Choose a recommended model or select custom to enter another model id.",
+                help="Choose a recommended model for the selected provider or select custom to enter another model id.",
             )
             if st.session_state.get("ui_openai_model") == "custom":
                 st.text_input(
@@ -178,7 +204,13 @@ def main() -> None:
                     key="ui_openai_custom_model",
                     placeholder="gpt-4.1-mini",
                 )
-            if st.button("Clear OpenAI key", use_container_width=True):
+            st.text_input(
+                "Custom base URL (optional)",
+                key="ui_llm_base_url",
+                placeholder="Leave blank to use the provider default",
+                help="Useful for self-hosted or compatible gateways. Ollama defaults to http://localhost:11434/v1/.",
+            )
+            if st.button("Clear API key", use_container_width=True):
                 st.session_state["ui_openai_api_key"] = ""
                 st.rerun()
             st.caption("Your API key is used only for the current Streamlit session.")
@@ -189,8 +221,8 @@ def main() -> None:
     runtime_settings = resolve_runtime_settings(settings)
     pipeline = DocumentPipeline(runtime_settings)
 
-    if extraction_mode == "llm-assisted" and not runtime_settings.openai_api_key:
-        st.warning("No OpenAI API key is active. `llm-assisted` mode will fall back to adaptive local extraction.")
+    if extraction_mode == "llm-assisted" and runtime_settings.llm_provider != "ollama" and not runtime_settings.openai_api_key:
+        st.warning("No API key is active for the selected provider. `llm-assisted` mode will fall back to adaptive local extraction.")
 
     uploaded_file = st.file_uploader(
         "Upload an invoice or similar unstructured business document",

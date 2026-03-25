@@ -20,6 +20,8 @@ class Settings:
     review_export_dir: Path
     enable_template_learning: bool
     min_learning_pass_ratio: float
+    llm_provider: str
+    llm_base_url: str | None
     openai_api_key: str | None
     openai_model: str
 
@@ -49,6 +51,8 @@ def get_settings() -> Settings:
         review_export_dir=review_export_dir,
         enable_template_learning=os.getenv("ENABLE_TEMPLATE_LEARNING", "true").lower() == "true",
         min_learning_pass_ratio=float(os.getenv("MIN_LEARNING_PASS_RATIO", "0.6")),
+        llm_provider=os.getenv("LLM_PROVIDER", "openai").strip().lower(),
+        llm_base_url=os.getenv("LLM_BASE_URL"),
         openai_api_key=os.getenv("OPENAI_API_KEY"),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
     )
