@@ -114,6 +114,7 @@ This means:
 - approved corrections improve future behavior through template memory
 - the current project does **not** train the base LLM itself
 - repeated runs become more stable once a user approves a correct result for future matching
+- unreviewed `llm-assisted` runs do not automatically update template memory
 
 The system learns in three ways:
 
@@ -143,7 +144,7 @@ If no reliable match is found, or if extraction is incomplete, the user can ente
 For stronger consistency on repeated uploads of the same format:
 
 - the LLM now uses a stricter JSON-only extraction request
-- the app reuses learned templates sooner when the document layout is similar
+- the app reuses learned templates sooner when the document layout is similar, but falls back to the LLM if the template result is too incomplete
 - a user can explicitly approve either the current extracted result or a reviewed correction for future matching
 
 ## Project Layout

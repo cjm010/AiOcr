@@ -171,6 +171,13 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
             extracted = _empty_invoice(parsed_document.file_name)
             extracted.update(_extract_from_template(template_match.template, parsed_document.raw_text))
             trace.append("Used learned template anchors because the document format looked familiar enough.")
+            if _needs_llm_fallback(extracted):
+                trace.append("Template extraction was too incomplete, so the pipeline fell back to the LLM.")
+                if not self._settings.openai_api_key:
+                    trace.append("No API key was available for LLM fallback, so incomplete template output was kept.")
+                else:
+                    extracted = self._extract_with_llm(parsed_document)
+                    trace.append("Used the LLM reasoning layer after incomplete template extraction.")
         else:
             if not self._settings.openai_api_key:
                 trace.append("OPENAI_API_KEY not set, so the pipeline fell back to adaptive local extraction.")
@@ -372,6 +379,12 @@ def _infer_missing_fields(raw_text: str, extracted: dict[str, Any]) -> dict[str,
             inferred["invoice_date"] = match.group(1)
 
     return inferred
+
+
+def _needs_llm_fallback(extracted: dict[str, Any]) -> bool:
+    required_fields = ("vendor_name", "invoice_number", "invoice_date", "total_amount")
+    missing_required = sum(1 for field in required_fields if extracted.get(field) in (None, "", []))
+    return missing_required >= 1
 
 
 def _strip_json_fence(content: str) -> str:

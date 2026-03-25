@@ -87,6 +87,7 @@ class DocumentPipeline:
             extracted_data=extracted_data,
             validation_checks=validation_checks,
             extraction_trace=extraction_trace,
+            allow_automatic_learning=extraction_mode != "llm-assisted",
         )
 
         if learned_template_name:
@@ -141,6 +142,7 @@ class DocumentPipeline:
             validation_checks=validation_checks,
             extraction_trace=extraction_trace,
             force_learning=approve_for_future_matching,
+            allow_automatic_learning=True,
         )
         if learned_template_name:
             extraction_trace.append(f"Learned or updated template `{learned_template_name}` from reviewed data.")
@@ -186,12 +188,16 @@ class DocumentPipeline:
         validation_checks: list,
         extraction_trace: list[str],
         force_learning: bool = False,
+        allow_automatic_learning: bool = True,
     ) -> str | None:
         if extraction_mode == "template-only":
             extraction_trace.append("Skipped learning because template-only mode is read-only.")
             return None
         if not self._settings.enable_template_learning or not learn_from_upload:
             extraction_trace.append("Template learning is disabled for this run.")
+            return None
+        if not force_learning and not allow_automatic_learning:
+            extraction_trace.append("Skipped automatic template learning for llm-assisted extraction until a user approves the result.")
             return None
 
         total_checks = len(validation_checks)
