@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import base64
 import json
 from dataclasses import replace
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from src.doc_ai.config import get_settings
 from src.doc_ai.pipeline import DocumentPipeline
@@ -46,22 +45,62 @@ MODEL_OPTIONS_BY_PROVIDER = {
 }
 
 
+@st.cache_data(show_spinner=False)
+def render_pdf_pages(upload_path: str) -> list[bytes]:
+    path = Path(upload_path)
+    if not path.exists() or path.suffix.lower() != ".pdf":
+        return []
+
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(str(path))
+    pages: list[bytes] = []
+    for page_index in range(len(document)):
+        page = document[page_index]
+        bitmap = page.render(scale=1.5)
+        image = bitmap.to_pil()
+        with BytesIO() as buffer:
+            image.save(buffer, format="PNG")
+            pages.append(buffer.getvalue())
+        page.close()
+    document.close()
+    return pages
+
+
 def render_pdf_preview(upload_path: str) -> None:
     path = Path(upload_path)
     if not path.exists() or path.suffix.lower() != ".pdf":
         st.info("PDF preview is only available for uploaded PDF files.")
         return
 
-    encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
-    pdf_html = f"""
-    <iframe
-        src="data:application/pdf;base64,{encoded}#toolbar=1&navpanes=0&scrollbar=1"
-        width="100%"
-        height="720"
-        style="border: 1px solid #d9d9d9; border-radius: 8px;"
-    ></iframe>
-    """
-    components.html(pdf_html, height=740, scrolling=True)
+    try:
+        page_images = render_pdf_pages(upload_path)
+    except Exception as exc:
+        st.warning(f"PDF preview could not be rendered in-app: {exc}")
+        st.download_button(
+            "Download PDF",
+            data=path.read_bytes(),
+            file_name=path.name,
+            mime="application/pdf",
+            use_container_width=True,
+        )
+        return
+
+    if not page_images:
+        st.info("This PDF could not be rendered for preview.")
+        return
+
+    st.caption("Preview is rendered as images so it works reliably in the browser.")
+    for index, image_bytes in enumerate(page_images, start=1):
+        st.image(image_bytes, caption=f"Page {index}", use_container_width=True)
+
+    st.download_button(
+        "Download original PDF",
+        data=path.read_bytes(),
+        file_name=path.name,
+        mime="application/pdf",
+        use_container_width=True,
+    )
 
 
 def coerce_form_data(source_file: str, values: dict[str, str]) -> dict[str, object]:
