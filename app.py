@@ -144,6 +144,12 @@ def render_review_form(
                     value="" if current is None else str(current),
                 )
 
+        approve_for_future_matching = st.checkbox(
+            "Approve this reviewed result for future matching",
+            value=True,
+            help="If checked, the reviewed values will be saved as a stronger template for similar future documents.",
+        )
+
         submitted = st.form_submit_button("Save reviewed result", type="primary")
 
     if submitted:
@@ -155,9 +161,34 @@ def render_review_form(
             corrected_data=corrected_data,
             extraction_mode=extraction_mode,
             learn_from_upload=learn_from_upload,
+            approve_for_future_matching=approve_for_future_matching,
         )
         st.session_state["last_result"] = reviewed_result
         st.success("Reviewed values saved. The outputs and validation report have been updated.")
+        st.rerun()
+
+
+def render_approval_actions(
+    pipeline: DocumentPipeline,
+    result,
+    extraction_mode: str,
+    learn_from_upload: bool,
+) -> None:
+    st.subheader("Approve current result")
+    st.caption("If these extracted values already look right, approve them so the system reuses this format next time.")
+
+    if st.button("Approve current result for future matching", use_container_width=True):
+        reviewed_result = pipeline.finalize_review(
+            source_file=result.source_file,
+            upload_path=result.upload_path,
+            parsed_text=result.parsed_text,
+            corrected_data=result.extracted_data,
+            extraction_mode=extraction_mode,
+            learn_from_upload=learn_from_upload,
+            approve_for_future_matching=True,
+        )
+        st.session_state["last_result"] = reviewed_result
+        st.success("This result was approved and saved for stronger future matching.")
         st.rerun()
 
 
@@ -331,6 +362,7 @@ def main() -> None:
     with review_col:
         st.subheader("Current extracted fields")
         st.json(result.extracted_data)
+        render_approval_actions(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
         st.subheader("Validation report")
         validation_df = pd.DataFrame(result.validation_results)
         if validation_df.empty:

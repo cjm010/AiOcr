@@ -125,9 +125,12 @@ class DocumentPipeline:
         corrected_data: dict[str, Any],
         extraction_mode: str = "adaptive-local",
         learn_from_upload: bool = True,
+        approve_for_future_matching: bool = False,
     ) -> PipelineResult:
         saved_path = Path(upload_path)
         extraction_trace = ["Used human-reviewed corrections from the UI."]
+        if approve_for_future_matching:
+            extraction_trace.append("User explicitly approved this result for future matching.")
         validation_checks = self._validator.validate(corrected_data)
         learned_template_name = self._learn_from_result(
             saved_path=saved_path,
@@ -137,6 +140,7 @@ class DocumentPipeline:
             extracted_data=corrected_data,
             validation_checks=validation_checks,
             extraction_trace=extraction_trace,
+            force_learning=approve_for_future_matching,
         )
         if learned_template_name:
             extraction_trace.append(f"Learned or updated template `{learned_template_name}` from reviewed data.")
@@ -152,6 +156,7 @@ class DocumentPipeline:
             "learned_template": learned_template_name,
             "outputs_written": list(output_files.keys()),
             "reviewed_by_user": True,
+            "approved_for_future_matching": approve_for_future_matching,
         }
 
         return PipelineResult(
@@ -180,6 +185,7 @@ class DocumentPipeline:
         extracted_data: dict[str, Any],
         validation_checks: list,
         extraction_trace: list[str],
+        force_learning: bool = False,
     ) -> str | None:
         if extraction_mode == "template-only":
             extraction_trace.append("Skipped learning because template-only mode is read-only.")
@@ -191,7 +197,12 @@ class DocumentPipeline:
         total_checks = len(validation_checks)
         pass_checks = sum(getattr(check, "status", "") == "pass" for check in validation_checks)
         pass_ratio = (pass_checks / total_checks) if total_checks else 0.0
-        if pass_ratio < self._settings.min_learning_pass_ratio:
+        if force_learning:
+            if not self._has_required_field_passes(validation_checks):
+                extraction_trace.append("Skipped template learning because approved data is still missing required fields.")
+                return None
+            extraction_trace.append("Bypassed normal learning threshold because the user explicitly approved the result.")
+        elif pass_ratio < self._settings.min_learning_pass_ratio:
             extraction_trace.append(
                 f"Skipped template learning because pass ratio {pass_ratio:.2f} is below "
                 f"{self._settings.min_learning_pass_ratio:.2f}."
@@ -202,3 +213,13 @@ class DocumentPipeline:
         signature = TemplateMemory.build_signature(parsed_lines)
         template = memory.learn_template(saved_path.name, signature, extracted_data, parsed_lines)
         return template.get("template_name")
+
+    @staticmethod
+    def _has_required_field_passes(validation_checks: list) -> bool:
+        required_fields = {"vendor_name", "invoice_number", "invoice_date", "total_amount"}
+        passing_fields = {
+            getattr(check, "field", "")
+            for check in validation_checks
+            if getattr(check, "status", "") == "pass" and getattr(check, "field", "") in required_fields
+        }
+        return required_fields.issubset(passing_fields)
