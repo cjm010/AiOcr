@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from io import BytesIO
@@ -214,6 +215,11 @@ def resolve_runtime_settings(base_settings):
     )
 
 
+def compute_upload_signature(file_name: str, file_bytes: bytes) -> str:
+    digest = hashlib.sha256(file_bytes).hexdigest()
+    return f"{file_name}:{len(file_bytes)}:{digest}"
+
+
 def main() -> None:
     settings = get_settings()
 
@@ -320,6 +326,15 @@ def main() -> None:
             )
         return
 
+    uploaded_bytes = uploaded_file.getvalue()
+    current_upload_signature = compute_upload_signature(uploaded_file.name, uploaded_bytes)
+    previous_upload_signature = st.session_state.get("current_upload_signature")
+    if previous_upload_signature != current_upload_signature:
+        st.session_state["current_upload_signature"] = current_upload_signature
+        if st.session_state.get("last_processed_signature") != current_upload_signature:
+            st.session_state.pop("last_result", None)
+            st.session_state.pop("last_uploaded_name", None)
+
     if st.button("Process document", type="primary"):
         try:
             with st.spinner("Running parsing, extraction, validation, and storage..."):
@@ -333,12 +348,13 @@ def main() -> None:
             st.stop()
         st.session_state["last_result"] = result
         st.session_state["last_uploaded_name"] = uploaded_file.name
+        st.session_state["last_processed_signature"] = current_upload_signature
 
     result = st.session_state.get("last_result")
     if not result:
         return
 
-    if st.session_state.get("last_uploaded_name") != uploaded_file.name:
+    if st.session_state.get("last_processed_signature") != current_upload_signature:
         st.info("Press `Process document` to run the pipeline for the currently selected file.")
         return
 
