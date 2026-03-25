@@ -59,7 +59,7 @@ class TemplateMemory:
         }
 
         best_match = self.find_best_match(signature)
-        if best_match and best_match.score >= 0.92:
+        if best_match and best_match.score >= 0.85:
             template["template_name"] = best_match.template.get("template_name", template["template_name"])
             templates = [
                 template if item.get("template_name") == template["template_name"] else item
@@ -95,16 +95,29 @@ class TemplateMemory:
 
     @staticmethod
     def build_signature(lines: list[str]) -> dict[str, Any]:
-        top_lines = [TemplateMemory._normalize(line) for line in lines[:8]]
-        joined = " ".join(lines[:20]).lower()
+        top_lines = [TemplateMemory._normalize(line) for line in lines[:12]]
+        joined = " ".join(lines[:30]).lower()
         keywords = sorted(
             {
                 keyword
-                for keyword in ("invoice", "vendor", "supplier", "total", "amount due", "tax", "due date")
+                for keyword in (
+                    "invoice",
+                    "vendor",
+                    "supplier",
+                    "bill to",
+                    "ship to",
+                    "total",
+                    "amount due",
+                    "tax",
+                    "due date",
+                    "invoice date",
+                    "subtotal",
+                )
                 if keyword in joined
             }
         )
-        return {"top_lines": top_lines, "keywords": keywords}
+        layout_hints = [TemplateMemory._line_shape(line) for line in lines[:12]]
+        return {"top_lines": top_lines, "keywords": keywords, "layout_hints": layout_hints}
 
     @staticmethod
     def _extract_label(line: str) -> str:
@@ -118,14 +131,24 @@ class TemplateMemory:
         return re.sub(r"\s+", " ", text).strip()
 
     @staticmethod
+    def _line_shape(text: str) -> str:
+        text = re.sub(r"[A-Z]", "A", text)
+        text = re.sub(r"[a-z]", "a", text)
+        text = re.sub(r"\d", "#", text)
+        return re.sub(r"\s+", " ", text.strip())[:120]
+
+    @staticmethod
     def _score_signature(left: dict[str, Any], right: dict[str, Any]) -> float:
         left_text = " | ".join(left.get("top_lines", []))
         right_text = " | ".join(right.get("top_lines", []))
         text_score = SequenceMatcher(None, left_text, right_text).ratio()
+        left_shape = " | ".join(left.get("layout_hints", []))
+        right_shape = " | ".join(right.get("layout_hints", []))
+        shape_score = SequenceMatcher(None, left_shape, right_shape).ratio()
         left_keywords = set(left.get("keywords", []))
         right_keywords = set(right.get("keywords", []))
         if not left_keywords and not right_keywords:
             keyword_score = 1.0
         else:
             keyword_score = len(left_keywords & right_keywords) / max(len(left_keywords | right_keywords), 1)
-        return round((text_score * 0.7) + (keyword_score * 0.3), 4)
+        return round((text_score * 0.5) + (shape_score * 0.25) + (keyword_score * 0.25), 4)
