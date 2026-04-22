@@ -25,6 +25,7 @@ The current prototype focuses on invoice-like documents as the first milestone, 
 - Open-source PDF/text parsing pipeline
 - Adaptive extraction with template memory, rule-based fallback, and optional LLM assistance for unfamiliar layouts
 - Validation for required fields, dates, totals, and data-quality style checks
+- **Extraction completeness indicator** — displays a live % score and progress bar showing how many of the 9 expected fields were populated, with contextual guidance (Good / Partial / Low)
 - Human review workflow with PDF preview and copyable parsed text
 - Output persistence to JSON, CSV, SQLite, and extraction trace logs
 - Colab notebook version for portable demos and collaboration
@@ -35,7 +36,7 @@ The solution is made up of five main layers:
 
 1. Presentation Layer
    - Streamlit UI for uploading documents
-   - Displays extracted fields, validation results, PDF preview, parsed text, and manual correction form
+   - Displays extracted fields, extraction completeness %, validation results, PDF preview, parsed text, and manual correction form
 
 2. Ingestion and Parsing Layer
    - Saves uploads locally
@@ -136,6 +137,10 @@ After processing a document, the app provides:
 - an embedded PDF preview for uploaded PDFs
 - copyable parsed text
 - extracted field values
+- **extraction completeness score** — a percentage metric and progress bar showing how many of the 9 expected fields were filled, with a contextual status label:
+  - **Good** (≥ 80%) — most fields extracted successfully
+  - **Partial** (50–79%) — review and fill in missing fields
+  - **Low** (< 50%) — many fields missing, manual review needed
 - validation results
 - a correction form for manual edits
 

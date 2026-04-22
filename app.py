@@ -35,7 +35,7 @@ FIELD_ORDER = [
     "currency",
 ]
 
-LLM_PROVIDER_OPTIONS = ["openai", "groq", "openrouter", "ollama"]
+LLM_PROVIDER_OPTIONS = ["openai", "groq", "openrouter", "ollama", "gemini"]
 
 MODEL_OPTIONS_BY_PROVIDER = {
     "openai": ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o", "custom"],
@@ -47,6 +47,7 @@ MODEL_OPTIONS_BY_PROVIDER = {
         "custom",
     ],
     "ollama": ["llama3.2", "mistral", "qwen2.5", "custom"],
+    "gemini": ["gemini-2.0-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro", "custom"],
 }
 
 
@@ -125,6 +126,24 @@ def coerce_form_data(source_file: str, values: dict[str, str]) -> dict[str, obje
     corrected["document_type"] = corrected.get("document_type") or "invoice"
     corrected["currency"] = corrected.get("currency") or "USD"
     return corrected
+
+
+def render_completeness_bar(extracted_data: dict) -> None:
+    filled = sum(1 for f in FIELD_ORDER if extracted_data.get(f) not in (None, "", "null"))
+    total = len(FIELD_ORDER)
+    pct = filled / total
+
+    left, right = st.columns([1, 2])
+    with left:
+        st.metric("Extraction completeness", f"{pct:.0%}", f"{filled}/{total} fields")
+    with right:
+        st.progress(pct)
+        if pct >= 0.8:
+            st.caption("Good — most fields extracted successfully.")
+        elif pct >= 0.5:
+            st.caption("Partial — review and fill in the missing fields below.")
+        else:
+            st.caption("Low — many fields are missing, manual review needed.")
 
 
 def render_review_form(
@@ -296,6 +315,7 @@ def _run_bulk_processing(
                     "validation_fails": result.summary.get("validation_fails", 0),
                     "needs_review": result.needs_review,
                     "errors": "; ".join(result.errors) if result.errors else "",
+                    "_result_obj": result,
                 })
                 icon = "✓" if status == "success" else "⚠"
                 status_lines.append(f"{icon} {item['name']}" + (" — needs review" if result.needs_review else ""))
@@ -309,6 +329,7 @@ def _run_bulk_processing(
                     "validation_fails": 0,
                     "needs_review": True,
                     "errors": str(exc),
+                    "_result_obj": None,
                 })
                 status_lines.append(f"✗ {item['name']}: {exc}")
                 logger.error("FAILED file=%s error=%s", item["name"], exc)
@@ -320,15 +341,153 @@ def _run_bulk_processing(
     return bulk_results
 
 
-def render_bulk_mode(
+
+def _is_bulk_auto_approvable(result) -> bool:
+    return (
+        not result.errors
+        and all(r.get("status") != "fail" for r in result.validation_results)
+    )
+
+
+def render_single_tab(
     pipeline: DocumentPipeline,
-    uploaded_files: list,
     extraction_mode: str,
     learn_from_upload: bool,
     logger: logging.Logger,
 ) -> None:
-    st.subheader(f"Bulk upload — {len(uploaded_files)} files selected")
+    uploaded_file = st.file_uploader(
+        "Upload an invoice or similar unstructured business document",
+        type=["pdf", "txt", "md", "json"],
+        accept_multiple_files=False,
+    )
 
+    if not uploaded_file:
+        st.info("Upload a file to run the pipeline.")
+        with st.expander("Example unstructured invoice text for testing"):
+            st.code(
+                "\n".join(
+                    [
+                        "Vendor: Greenleaf Supplies",
+                        "Invoice Number: 4587",
+                        "Invoice Date: 2024-02-12",
+                        "Due Date: 2024-03-12",
+                        "Subtotal: 1100.00",
+                        "Tax: 100.00",
+                        "Total: 1200.00",
+                        "Currency: USD",
+                    ]
+                ),
+                language="text",
+            )
+        return
+
+    uploaded_bytes = uploaded_file.getvalue()
+    current_upload_signature = compute_upload_signature(uploaded_bytes)
+    previous_upload_signature = st.session_state.get("current_upload_signature")
+    if previous_upload_signature != current_upload_signature:
+        st.session_state["current_upload_signature"] = current_upload_signature
+        if st.session_state.get("last_processed_signature") != current_upload_signature:
+            st.session_state.pop("last_result", None)
+            st.session_state.pop("last_uploaded_name", None)
+
+    if st.button("Process document", type="primary"):
+        try:
+            with st.spinner("Running parsing, extraction, validation, and storage..."):
+                result = pipeline.process_upload(
+                    uploaded_file,
+                    extraction_mode=extraction_mode,
+                    learn_from_upload=learn_from_upload,
+                )
+            logger.info("SUCCESS file=%s hash=%s needs_review=%s", uploaded_file.name, result.content_hash, result.needs_review)
+        except Exception as exc:
+            logger.error("FAILED file=%s error=%s", uploaded_file.name, exc)
+            st.error(f"Pipeline failed unexpectedly: {exc}")
+            return
+        st.session_state["last_result"] = result
+        st.session_state["last_uploaded_name"] = uploaded_file.name
+        st.session_state["last_processed_signature"] = current_upload_signature
+
+    result = st.session_state.get("last_result")
+    if not result:
+        return
+
+    if st.session_state.get("last_processed_signature") != current_upload_signature:
+        st.info("Press `Process document` to run the pipeline for the currently selected file.")
+        return
+
+    st.subheader("Processing summary")
+    st.write(result.summary)
+
+    if result.errors:
+        st.error("The pipeline completed with errors or warnings.")
+        for error in result.errors:
+            st.write(f"- {error}")
+
+    doc_col, review_col = st.columns([1.1, 1])
+
+    with doc_col:
+        st.subheader("Source document")
+        render_pdf_preview(result.upload_path)
+        st.subheader("Copyable parsed text")
+        st.caption("If the embedded PDF viewer does not let you copy text easily, use this parsed text instead.")
+        st.text_area("Parsed document text", result.parsed_text[:20000], height=320)
+
+    with review_col:
+        st.subheader("Current extracted fields")
+        render_completeness_bar(result.extracted_data)
+        st.json(result.extracted_data)
+        render_approval_actions(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
+        st.subheader("Validation report")
+        validation_df = pd.DataFrame(result.validation_results)
+        if validation_df.empty:
+            st.info("No validation checks were produced.")
+        else:
+            st.dataframe(validation_df, use_container_width=True)
+        render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
+
+    st.subheader("Agent trace")
+    if result.extraction_trace:
+        for step in result.extraction_trace:
+            st.write(f"- {step}")
+    else:
+        st.info("No extraction trace was recorded.")
+
+    st.subheader("Output files")
+    for label, path_str in result.output_files.items():
+        path = Path(path_str)
+        st.write(f"{label}: `{path}`")
+        if path.suffix == ".json" and path.exists():
+            st.download_button(
+                label=f"Download {path.name}",
+                data=json.dumps(result.extracted_data, indent=2),
+                file_name=path.name,
+                mime="application/json",
+            )
+
+
+def render_bulk_tab(
+    pipeline: DocumentPipeline,
+    extraction_mode: str,
+    learn_from_upload: bool,
+    logger: logging.Logger,
+) -> None:
+    st.caption(
+        "Upload multiple documents at once. Files that pass all validation checks are auto-approved and stored. "
+        "Files with failures are queued for manual review."
+    )
+
+    uploaded_files = st.file_uploader(
+        "Upload documents for bulk processing",
+        type=["pdf", "txt", "md", "json"],
+        accept_multiple_files=True,
+        key="bulk_uploader",
+    )
+
+    if not uploaded_files:
+        st.info("Upload one or more files to begin bulk processing.")
+        return
+
+    # Pre-read bytes and deduplicate on main thread before any processing
     file_items: list[dict] = []
     seen_hashes: dict[str, str] = {}
     for f in uploaded_files:
@@ -357,20 +516,156 @@ def render_bulk_mode(
 
     if not to_process:
         st.info("All uploaded files have already been processed or are duplicates.")
-        if st.session_state.get("bulk_results"):
-            render_bulk_summary(st.session_state["bulk_results"])
         return
 
     max_workers = st.slider("Parallel workers", min_value=1, max_value=8, value=min(4, os.cpu_count() or 2))
 
-    if st.button(f"Process {len(to_process)} document(s)", type="primary", use_container_width=True):
-        bulk_results = _run_bulk_processing(
+    if st.button("Process all documents", type="primary", key="bulk_process_btn", use_container_width=True):
+        raw_results = _run_bulk_processing(
             pipeline, to_process, extraction_mode, learn_from_upload, max_workers, logger
         )
-        st.session_state["bulk_results"] = bulk_results
+        approved: list = []
+        flagged: list = []
+        for item_result in raw_results:
+            if item_result.get("status") == "failed":
+                flagged.append(item_result.get("_result_obj"))
+            elif _is_bulk_auto_approvable(item_result["_result_obj"]):
+                approved.append(item_result["_result_obj"])
+            else:
+                flagged.append(item_result["_result_obj"])
+        st.session_state["bulk_approved"] = approved
+        st.session_state["bulk_flagged"] = [r for r in flagged if r is not None]
+        st.session_state["bulk_summary_rows"] = raw_results
+        st.session_state["bulk_review_index"] = 0
+        st.session_state.pop("bulk_reviewed", None)
+        st.rerun()
 
-    if st.session_state.get("bulk_results"):
-        render_bulk_summary(st.session_state["bulk_results"])
+    approved = st.session_state.get("bulk_approved")
+    flagged = st.session_state.get("bulk_flagged")
+    if approved is None:
+        return
+
+    # Summary metrics
+    total_processed = len(approved) + len(flagged)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total processed", total_processed)
+    m2.metric("Auto-approved", len(approved))
+    m3.metric("Needs review", len(flagged))
+
+    # Summary table with CSV export
+    rows = []
+    for r in approved:
+        filled = sum(1 for f in FIELD_ORDER if r.extracted_data.get(f) not in (None, "", "null"))
+        rows.append({
+            "File": r.source_file,
+            "Status": "auto-approved",
+            "Completeness": f"{filled}/{len(FIELD_ORDER)} ({filled * 100 // len(FIELD_ORDER)}%)",
+            "Validation fails": 0,
+            "Content hash": r.content_hash,
+        })
+    for r in flagged:
+        filled = sum(1 for f in FIELD_ORDER if r.extracted_data.get(f) not in (None, "", "null"))
+        fails = sum(1 for c in r.validation_results if c.get("status") == "fail")
+        rows.append({
+            "File": r.source_file,
+            "Status": "needs review",
+            "Completeness": f"{filled}/{len(FIELD_ORDER)} ({filled * 100 // len(FIELD_ORDER)}%)",
+            "Validation fails": fails,
+            "Content hash": r.content_hash,
+        })
+
+    summary_df = pd.DataFrame(rows)
+    with st.expander("Batch summary table", expanded=True):
+        st.dataframe(summary_df, use_container_width=True)
+        st.download_button(
+            "Export summary as CSV",
+            data=summary_df.to_csv(index=False),
+            file_name="bulk_upload_summary.csv",
+            mime="text/csv",
+        )
+
+    if not flagged:
+        st.success("All documents passed validation and have been auto-approved.")
+        return
+
+    # Review queue
+    review_index = st.session_state.get("bulk_review_index", 0)
+    if "bulk_reviewed" not in st.session_state:
+        st.session_state["bulk_reviewed"] = []
+
+    if review_index >= len(flagged):
+        st.success(f"All {len(flagged)} flagged document(s) have been reviewed.")
+        if st.button("← Go back to first item", key="bulk_restart"):
+            st.session_state["bulk_review_index"] = 0
+            st.rerun()
+        return
+
+    st.divider()
+    current = flagged[review_index]
+
+    # Navigation row
+    prev_col, info_col, next_col = st.columns([1, 3, 1])
+    with prev_col:
+        if st.button("← Previous", disabled=(review_index == 0), use_container_width=True, key="bulk_prev"):
+            st.session_state["bulk_review_index"] = review_index - 1
+            st.rerun()
+    with info_col:
+        st.markdown(
+            f"<p style='text-align:center;padding-top:6px'>"
+            f"Item <b>{review_index + 1}</b> of <b>{len(flagged)}</b> flagged</p>",
+            unsafe_allow_html=True,
+        )
+    with next_col:
+        if st.button("Next →", disabled=(review_index >= len(flagged) - 1), use_container_width=True, key="bulk_next"):
+            st.session_state["bulk_review_index"] = review_index + 1
+            st.rerun()
+
+    st.subheader(f"Reviewing: {current.source_file}")
+    render_completeness_bar(current.extracted_data)
+
+    fails = [c for c in current.validation_results if c.get("status") == "fail"]
+    if fails:
+        st.warning(f"{len(fails)} validation check(s) failed — correct or confirm the values below.")
+        for c in fails:
+            st.write(f"- **{c['field']}**: {c['message']}")
+
+    defaults = {field: current.extracted_data.get(field) for field in FIELD_ORDER}
+    with st.form(f"bulk_review_{review_index}"):
+        form_values: dict[str, str] = {}
+        left_col, right_col = st.columns(2)
+        for idx, field in enumerate(FIELD_ORDER):
+            target_col = left_col if idx % 2 == 0 else right_col
+            current_val = defaults.get(field)
+            with target_col:
+                form_values[field] = st.text_input(
+                    field.replace("_", " ").title(),
+                    value="" if current_val is None else str(current_val),
+                )
+        approve_future = st.checkbox("Approve for future matching", value=True)
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            submitted = st.form_submit_button("Save and continue", type="primary", use_container_width=True)
+        with btn_col2:
+            skipped = st.form_submit_button("Skip", use_container_width=True)
+
+    if submitted:
+        corrected = coerce_form_data(current.source_file, form_values)
+        reviewed = pipeline.finalize_review(
+            source_file=current.source_file,
+            upload_path=current.upload_path,
+            parsed_text=current.parsed_text,
+            corrected_data=corrected,
+            extraction_mode=extraction_mode,
+            learn_from_upload=learn_from_upload,
+            approve_for_future_matching=approve_future,
+        )
+        st.session_state["bulk_reviewed"].append(reviewed)
+        st.session_state["bulk_review_index"] = review_index + 1
+        st.rerun()
+
+    if skipped:
+        st.session_state["bulk_review_index"] = review_index + 1
+        st.rerun()
 
 
 def main() -> None:
@@ -451,122 +746,16 @@ def main() -> None:
     runtime_settings = resolve_runtime_settings(settings)
     pipeline = DocumentPipeline(runtime_settings)
 
-    if extraction_mode == "llm-assisted" and runtime_settings.llm_provider != "ollama" and not runtime_settings.openai_api_key:
+    if extraction_mode == "llm-assisted" and runtime_settings.llm_provider not in ("ollama",) and not runtime_settings.openai_api_key:
         st.warning("No API key is active for the selected provider. `llm-assisted` mode will fall back to adaptive local extraction.")
 
-    uploaded_files = st.file_uploader(
-        "Upload one or more invoices or similar unstructured business documents",
-        type=["pdf", "txt", "md", "json"],
-        accept_multiple_files=True,
-    )
+    tab_single, tab_bulk = st.tabs(["Single Document", "Bulk Upload"])
 
-    if not uploaded_files:
-        st.info("Upload one or more files to run the pipeline.")
-        with st.expander("Example unstructured invoice text for testing"):
-            st.code(
-                "\n".join(
-                    [
-                        "Vendor: Greenleaf Supplies",
-                        "Invoice Number: 4587",
-                        "Invoice Date: 2024-02-12",
-                        "Due Date: 2024-03-12",
-                        "Subtotal: 1100.00",
-                        "Tax: 100.00",
-                        "Total: 1200.00",
-                        "Currency: USD",
-                    ]
-                ),
-                language="text",
-            )
-        return
+    with tab_single:
+        render_single_tab(pipeline, extraction_mode, learn_from_upload, logger)
 
-    if len(uploaded_files) > 1:
-        render_bulk_mode(pipeline, uploaded_files, extraction_mode, learn_from_upload, logger)
-        return
-
-    # --- Single file mode ---
-    uploaded_file = uploaded_files[0]
-    uploaded_bytes = uploaded_file.getvalue()
-    current_upload_signature = compute_upload_signature(uploaded_bytes)
-    previous_upload_signature = st.session_state.get("current_upload_signature")
-    if previous_upload_signature != current_upload_signature:
-        st.session_state["current_upload_signature"] = current_upload_signature
-        if st.session_state.get("last_processed_signature") != current_upload_signature:
-            st.session_state.pop("last_result", None)
-            st.session_state.pop("last_uploaded_name", None)
-
-    if st.button("Process document", type="primary"):
-        try:
-            with st.spinner("Running parsing, extraction, validation, and storage..."):
-                result = pipeline.process_upload(
-                    uploaded_file,
-                    extraction_mode=extraction_mode,
-                    learn_from_upload=learn_from_upload,
-                )
-            logger.info("SUCCESS file=%s hash=%s needs_review=%s", uploaded_file.name, result.content_hash, result.needs_review)
-        except Exception as exc:
-            logger.error("FAILED file=%s error=%s", uploaded_file.name, exc)
-            st.error(f"Pipeline failed unexpectedly: {exc}")
-            return
-        st.session_state["last_result"] = result
-        st.session_state["last_uploaded_name"] = uploaded_file.name
-        st.session_state["last_processed_signature"] = current_upload_signature
-
-    result = st.session_state.get("last_result")
-    if not result:
-        return
-
-    if st.session_state.get("last_processed_signature") != current_upload_signature:
-        st.info("Press `Process document` to run the pipeline for the currently selected file.")
-        return
-
-    st.subheader("Processing summary")
-    st.write(result.summary)
-
-    if result.errors:
-        st.error("The pipeline completed with errors or warnings.")
-        for error in result.errors:
-            st.write(f"- {error}")
-
-    doc_col, review_col = st.columns([1.1, 1])
-
-    with doc_col:
-        st.subheader("Source document")
-        render_pdf_preview(result.upload_path)
-        st.subheader("Copyable parsed text")
-        st.caption("If the embedded PDF viewer does not let you copy text easily, use this parsed text instead.")
-        st.text_area("Parsed document text", result.parsed_text[:20000], height=320)
-
-    with review_col:
-        st.subheader("Current extracted fields")
-        st.json(result.extracted_data)
-        render_approval_actions(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
-        st.subheader("Validation report")
-        validation_df = pd.DataFrame(result.validation_results)
-        if validation_df.empty:
-            st.info("No validation checks were produced.")
-        else:
-            st.dataframe(validation_df, use_container_width=True)
-        render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
-
-    st.subheader("Agent trace")
-    if result.extraction_trace:
-        for step in result.extraction_trace:
-            st.write(f"- {step}")
-    else:
-        st.info("No extraction trace was recorded.")
-
-    st.subheader("Output files")
-    for label, path_str in result.output_files.items():
-        path = Path(path_str)
-        st.write(f"{label}: `{path}`")
-        if path.suffix == ".json" and path.exists():
-            st.download_button(
-                label=f"Download {path.name}",
-                data=json.dumps(result.extracted_data, indent=2),
-                file_name=path.name,
-                mime="application/json",
-            )
+    with tab_bulk:
+        render_bulk_tab(pipeline, extraction_mode, learn_from_upload, logger)
 
 
 if __name__ == "__main__":
