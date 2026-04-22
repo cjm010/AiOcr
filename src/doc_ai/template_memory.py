@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
+
+_TEMPLATE_WRITE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -43,33 +46,34 @@ class TemplateMemory:
         extracted_data: dict[str, Any],
         lines: list[str],
     ) -> dict[str, Any]:
-        templates = self.load_templates()
-        anchors = self._build_anchors(extracted_data, lines)
+        with _TEMPLATE_WRITE_LOCK:
+            templates = self.load_templates()
+            anchors = self._build_anchors(extracted_data, lines)
 
-        template = {
-            "template_name": Path(source_file).stem,
-            "document_type": extracted_data.get("document_type", "invoice"),
-            "signature": signature,
-            "anchors": anchors,
-            "example_fields": {
-                key: value
-                for key, value in extracted_data.items()
-                if key not in {"source_file"} and value not in (None, "", [])
-            },
-        }
+            template = {
+                "template_name": Path(source_file).stem,
+                "document_type": extracted_data.get("document_type", "invoice"),
+                "signature": signature,
+                "anchors": anchors,
+                "example_fields": {
+                    key: value
+                    for key, value in extracted_data.items()
+                    if key not in {"source_file"} and value not in (None, "", [])
+                },
+            }
 
-        best_match = self.find_best_match(signature)
-        if best_match and best_match.score >= 0.85:
-            template["template_name"] = best_match.template.get("template_name", template["template_name"])
-            templates = [
-                template if item.get("template_name") == template["template_name"] else item
-                for item in templates
-            ]
-        else:
-            templates.append(template)
+            best_match = self.find_best_match(signature)
+            if best_match and best_match.score >= 0.85:
+                template["template_name"] = best_match.template.get("template_name", template["template_name"])
+                templates = [
+                    template if item.get("template_name") == template["template_name"] else item
+                    for item in templates
+                ]
+            else:
+                templates.append(template)
 
-        self._store_path.write_text(json.dumps(templates, indent=2), encoding="utf-8")
-        return template
+            self._store_path.write_text(json.dumps(templates, indent=2), encoding="utf-8")
+            return template
 
     def _build_anchors(self, extracted_data: dict[str, Any], lines: list[str]) -> dict[str, dict[str, str]]:
         anchors: dict[str, dict[str, str]] = {}

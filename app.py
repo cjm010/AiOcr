@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
@@ -10,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from src.doc_ai.config import get_settings
+from src.doc_ai.logging_config import setup_logging
 from src.doc_ai.pipeline import DocumentPipeline
 
 
@@ -215,13 +219,163 @@ def resolve_runtime_settings(base_settings):
     )
 
 
-def compute_upload_signature(file_name: str, file_bytes: bytes) -> str:
-    digest = hashlib.sha256(file_bytes).hexdigest()
-    return f"{file_name}:{len(file_bytes)}:{digest}"
+def compute_upload_signature(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+def render_bulk_summary(bulk_results: list[dict]) -> None:
+    st.subheader("Bulk upload summary")
+    df = pd.DataFrame(bulk_results)
+    total = len(df)
+    succeeded = int((df["status"] == "success").sum())
+    needs_review_count = int(df["needs_review"].sum())
+    failed = int((df["status"] == "failed").sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total", total)
+    c2.metric("Succeeded", succeeded)
+    c3.metric("Needs Review", needs_review_count)
+    c4.metric("Failed", failed)
+
+    display_cols = ["filename", "status", "extraction_mode", "validation_fails", "needs_review", "errors"]
+    st.dataframe(df[display_cols], use_container_width=True)
+
+    st.download_button(
+        "Export summary as CSV",
+        data=df.to_csv(index=False),
+        file_name="bulk_upload_summary.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    if failed:
+        st.error(f"{failed} file(s) failed to process.")
+        for row in df[df["status"] == "failed"].itertuples():
+            st.write(f"- **{row.filename}**: {row.errors}")
+
+    if needs_review_count:
+        st.warning(f"{needs_review_count} file(s) flagged for manual review — check validation failures or missing template matches.")
+
+
+def _run_bulk_processing(
+    pipeline: DocumentPipeline,
+    file_items: list[dict],
+    extraction_mode: str,
+    learn_from_upload: bool,
+    max_workers: int,
+    logger: logging.Logger,
+) -> list[dict]:
+    total = len(file_items)
+    progress_bar = st.progress(0.0, text=f"Starting — 0 / {total} processed")
+    status_placeholder = st.empty()
+    completed = 0
+    status_lines: list[str] = []
+    bulk_results: list[dict] = []
+
+    def process_one(item: dict):
+        return pipeline.process_bytes(
+            item["name"],
+            item["bytes"],
+            extraction_mode=extraction_mode,
+            learn_from_upload=learn_from_upload,
+        )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_item = {executor.submit(process_one, item): item for item in file_items}
+        for future in as_completed(future_to_item):
+            item = future_to_item[future]
+            completed += 1
+            try:
+                result = future.result()
+                status = "needs_review" if result.needs_review else "success"
+                bulk_results.append({
+                    "filename": item["name"],
+                    "content_hash": result.content_hash,
+                    "status": status,
+                    "extraction_mode": result.summary.get("extraction_mode", extraction_mode),
+                    "validation_fails": result.summary.get("validation_fails", 0),
+                    "needs_review": result.needs_review,
+                    "errors": "; ".join(result.errors) if result.errors else "",
+                })
+                icon = "✓" if status == "success" else "⚠"
+                status_lines.append(f"{icon} {item['name']}" + (" — needs review" if result.needs_review else ""))
+                logger.info("SUCCESS file=%s hash=%s needs_review=%s", item["name"], result.content_hash, result.needs_review)
+            except Exception as exc:
+                bulk_results.append({
+                    "filename": item["name"],
+                    "content_hash": item["hash"],
+                    "status": "failed",
+                    "extraction_mode": extraction_mode,
+                    "validation_fails": 0,
+                    "needs_review": True,
+                    "errors": str(exc),
+                })
+                status_lines.append(f"✗ {item['name']}: {exc}")
+                logger.error("FAILED file=%s error=%s", item["name"], exc)
+
+            progress_bar.progress(completed / total, text=f"{completed} / {total} processed — {item['name']}")
+            status_placeholder.text("\n".join(status_lines[-8:]))
+
+    progress_bar.progress(1.0, text=f"Complete — {total} file(s) processed")
+    return bulk_results
+
+
+def render_bulk_mode(
+    pipeline: DocumentPipeline,
+    uploaded_files: list,
+    extraction_mode: str,
+    learn_from_upload: bool,
+    logger: logging.Logger,
+) -> None:
+    st.subheader(f"Bulk upload — {len(uploaded_files)} files selected")
+
+    file_items: list[dict] = []
+    seen_hashes: dict[str, str] = {}
+    for f in uploaded_files:
+        fb = f.getvalue()
+        h = compute_upload_signature(fb)
+        if h in seen_hashes:
+            file_items.append({"name": f.name, "bytes": fb, "hash": h, "skip_reason": f"duplicate of '{seen_hashes[h]}' in this batch"})
+        elif pipeline.is_already_processed(h):
+            file_items.append({"name": f.name, "bytes": fb, "hash": h, "skip_reason": "already in database"})
+        else:
+            seen_hashes[h] = f.name
+            file_items.append({"name": f.name, "bytes": fb, "hash": h, "skip_reason": None})
+
+    to_process = [item for item in file_items if item["skip_reason"] is None]
+    to_skip = [item for item in file_items if item["skip_reason"] is not None]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total uploaded", len(uploaded_files))
+    c2.metric("To process", len(to_process))
+    c3.metric("Skipped (duplicates)", len(to_skip))
+
+    if to_skip:
+        with st.expander(f"{len(to_skip)} file(s) skipped"):
+            for item in to_skip:
+                st.write(f"- **{item['name']}** — {item['skip_reason']}")
+
+    if not to_process:
+        st.info("All uploaded files have already been processed or are duplicates.")
+        if st.session_state.get("bulk_results"):
+            render_bulk_summary(st.session_state["bulk_results"])
+        return
+
+    max_workers = st.slider("Parallel workers", min_value=1, max_value=8, value=min(4, os.cpu_count() or 2))
+
+    if st.button(f"Process {len(to_process)} document(s)", type="primary", use_container_width=True):
+        bulk_results = _run_bulk_processing(
+            pipeline, to_process, extraction_mode, learn_from_upload, max_workers, logger
+        )
+        st.session_state["bulk_results"] = bulk_results
+
+    if st.session_state.get("bulk_results"):
+        render_bulk_summary(st.session_state["bulk_results"])
 
 
 def main() -> None:
     settings = get_settings()
+    logger = setup_logging(settings.data_dir / "logs")
 
     st.title("AI-Powered Data Quality Platform for Unstructured Data")
     st.caption(
@@ -300,14 +454,14 @@ def main() -> None:
     if extraction_mode == "llm-assisted" and runtime_settings.llm_provider != "ollama" and not runtime_settings.openai_api_key:
         st.warning("No API key is active for the selected provider. `llm-assisted` mode will fall back to adaptive local extraction.")
 
-    uploaded_file = st.file_uploader(
-        "Upload an invoice or similar unstructured business document",
+    uploaded_files = st.file_uploader(
+        "Upload one or more invoices or similar unstructured business documents",
         type=["pdf", "txt", "md", "json"],
-        accept_multiple_files=False,
+        accept_multiple_files=True,
     )
 
-    if not uploaded_file:
-        st.info("Upload a file to run the pipeline.")
+    if not uploaded_files:
+        st.info("Upload one or more files to run the pipeline.")
         with st.expander("Example unstructured invoice text for testing"):
             st.code(
                 "\n".join(
@@ -326,8 +480,14 @@ def main() -> None:
             )
         return
 
+    if len(uploaded_files) > 1:
+        render_bulk_mode(pipeline, uploaded_files, extraction_mode, learn_from_upload, logger)
+        return
+
+    # --- Single file mode ---
+    uploaded_file = uploaded_files[0]
     uploaded_bytes = uploaded_file.getvalue()
-    current_upload_signature = compute_upload_signature(uploaded_file.name, uploaded_bytes)
+    current_upload_signature = compute_upload_signature(uploaded_bytes)
     previous_upload_signature = st.session_state.get("current_upload_signature")
     if previous_upload_signature != current_upload_signature:
         st.session_state["current_upload_signature"] = current_upload_signature
@@ -343,9 +503,11 @@ def main() -> None:
                     extraction_mode=extraction_mode,
                     learn_from_upload=learn_from_upload,
                 )
+            logger.info("SUCCESS file=%s hash=%s needs_review=%s", uploaded_file.name, result.content_hash, result.needs_review)
         except Exception as exc:
+            logger.error("FAILED file=%s error=%s", uploaded_file.name, exc)
             st.error(f"Pipeline failed unexpectedly: {exc}")
-            st.stop()
+            return
         st.session_state["last_result"] = result
         st.session_state["last_uploaded_name"] = uploaded_file.name
         st.session_state["last_processed_signature"] = current_upload_signature

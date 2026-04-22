@@ -36,4 +36,6 @@ class PipelineResult:
     summary: dict[str, Any]
     errors: list[str]
     extraction_trace: list[str] = field(default_factory=list)
+    content_hash: str = ""
+    needs_review: bool = False
     processed_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,21 @@ class DocumentPipeline:
         extraction_mode: str = "adaptive-local",
         learn_from_upload: bool = True,
     ) -> PipelineResult:
-        saved_path = self._save_upload(uploaded_file.name, uploaded_file.getbuffer())
+        return self.process_bytes(
+            uploaded_file.name,
+            bytes(uploaded_file.getbuffer()),
+            extraction_mode=extraction_mode,
+            learn_from_upload=learn_from_upload,
+        )
+
+    def process_bytes(
+        self,
+        file_name: str,
+        file_bytes: bytes,
+        extraction_mode: str = "adaptive-local",
+        learn_from_upload: bool = True,
+    ) -> PipelineResult:
+        saved_path, content_hash = self._save_upload(file_name, file_bytes)
         errors: list[str] = []
         extraction_trace: list[str] = []
 
@@ -53,6 +68,8 @@ class DocumentPipeline:
                 },
                 errors=errors,
                 extraction_trace=extraction_trace,
+                content_hash=content_hash,
+                needs_review=True,
             )
 
         extractor = build_extractor(extraction_mode, self._settings)
@@ -93,10 +110,33 @@ class DocumentPipeline:
         if learned_template_name:
             extraction_trace.append(f"Learned or updated template `{learned_template_name}` from this upload.")
 
-        output_files = self._store.persist(saved_path.name, extracted_data, validation_checks, extraction_trace)
+        rule_based_fallback = (
+            extraction_mode in ("adaptive-local", "template-only")
+            and not any(
+                "learned template" in step.lower()
+                and any(kw in step.lower() for kw in ("matched", "applied", "used"))
+                for step in extraction_trace
+            )
+        )
+        needs_review = bool(
+            errors
+            or any(check.status == "fail" for check in validation_checks)
+            or rule_based_fallback
+        )
+
+        output_files = self._store.persist(
+            saved_path.name,
+            extracted_data,
+            validation_checks,
+            extraction_trace,
+            content_hash=content_hash,
+            original_filename=file_name,
+        )
 
         summary = {
             "source_file": saved_path.name,
+            "original_filename": file_name,
+            "content_hash": content_hash,
             "extraction_mode": extraction_mode,
             "validation_passes": sum(check.status == "pass" for check in validation_checks),
             "validation_fails": sum(check.status == "fail" for check in validation_checks),
@@ -104,6 +144,7 @@ class DocumentPipeline:
             "template_learning_enabled": self._settings.enable_template_learning and learn_from_upload,
             "learned_template": learned_template_name,
             "outputs_written": list(output_files.keys()),
+            "needs_review": needs_review,
         }
 
         return PipelineResult(
@@ -116,7 +157,12 @@ class DocumentPipeline:
             summary=summary,
             errors=errors,
             extraction_trace=extraction_trace,
+            content_hash=content_hash,
+            needs_review=needs_review,
         )
+
+    def is_already_processed(self, content_hash: str) -> bool:
+        return self._store.has_been_processed(content_hash)
 
     def finalize_review(
         self,
@@ -173,10 +219,14 @@ class DocumentPipeline:
             extraction_trace=extraction_trace,
         )
 
-    def _save_upload(self, file_name: str, file_bytes: bytes) -> Path:
-        destination = self._settings.upload_dir / Path(file_name).name
+    def _save_upload(self, file_name: str, file_bytes: bytes) -> tuple[Path, str]:
+        content_hash = hashlib.sha256(file_bytes).hexdigest()
+        stem = Path(file_name).stem
+        suffix = Path(file_name).suffix
+        saved_name = f"{stem}_{content_hash[:8]}{suffix}"
+        destination = self._settings.upload_dir / saved_name
         destination.write_bytes(file_bytes)
-        return destination
+        return destination, content_hash
 
     def _learn_from_result(
         self,
