@@ -298,6 +298,11 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
                 api_key=api_key or "ollama",
                 base_url=base_url or "http://localhost:11434/v1/",
             )
+        if provider == "gemini":
+            return openai_cls(
+                api_key=api_key,
+                base_url=base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
+            )
         return openai_cls(
             api_key=api_key,
             base_url=base_url,
