@@ -184,6 +184,7 @@ def render_review_form(
             approve_for_future_matching=approve_for_future_matching,
         )
         st.session_state["last_result"] = reviewed_result
+        st.session_state.manual_corrections_total += 1
         st.success("Reviewed values saved. The outputs and validation report have been updated.")
         st.rerun()
 
@@ -208,6 +209,7 @@ def render_approval_actions(
             approve_for_future_matching=True,
         )
         st.session_state["last_result"] = reviewed_result
+        st.session_state.approvals_total += 1
         st.success("This result was approved and saved for stronger future matching.")
         st.rerun()
 
@@ -300,6 +302,9 @@ def render_single_tab(
         st.session_state["last_result"] = result
         st.session_state["last_uploaded_name"] = uploaded_file.name
         st.session_state["last_processed_signature"] = current_upload_signature
+
+        st.session_state.docs_processed_total += 1
+
 
     result = st.session_state.get("last_result")
     if not result:
@@ -532,6 +537,19 @@ def render_bulk_tab(
 def main() -> None:
     settings = get_settings()
 
+        # ---------------- INIT DASHBOARD STATE ---------------- #
+    if "docs_processed_total" not in st.session_state:
+        st.session_state.docs_processed_total = 0
+
+    if "manual_corrections_total" not in st.session_state:
+        st.session_state.manual_corrections_total = 0
+
+    if "approvals_total" not in st.session_state:
+        st.session_state.approvals_total = 0
+
+    if "uploads_total" not in st.session_state:
+        st.session_state.uploads_total = 0
+
     st.title("AI-Powered Data Quality Platform for Unstructured Data")
     st.caption(
         "Upload an unstructured business document, convert it into structured data, validate the output, and review any corrections."
@@ -610,6 +628,150 @@ def main() -> None:
         st.warning("No API key is active for the selected provider. `llm-assisted` mode will fall back to adaptive local extraction.")
 
     tab_single, tab_bulk = st.tabs(["Single Document", "Bulk Upload"])
+
+        # ===================== ADMIN DASHBOARD ===================== #
+
+    st.markdown("## 📊 Admin Dashboard")
+
+    # ---------------- SESSION METRICS ---------------- #
+
+    if "docs_processed_total" not in st.session_state:
+        st.session_state.docs_processed_total = 0
+
+    if "manual_corrections_total" not in st.session_state:
+        st.session_state.manual_corrections_total = 0
+
+    if "approvals_total" not in st.session_state:
+        st.session_state.approvals_total = 0
+
+
+    # ---------------- DERIVED METRICS ---------------- #
+
+    total_docs = (
+        st.session_state.docs_processed_total
+    )
+
+    manual_reviews = (
+        st.session_state.manual_corrections_total
+    )
+
+    approvals = (
+        st.session_state.approvals_total
+    )
+
+    review_rate = (
+        round(
+            manual_reviews / max(total_docs, 1) * 100,
+            1
+        )
+    )
+
+
+    # ---------------- KPI ROW ---------------- #
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    c1.metric("Docs Processed", total_docs)
+    c2.metric("Manual Corrections", manual_reviews)
+    c3.metric("Approvals", approvals)
+    c4.metric("Review Rate", f"{review_rate}%")
+    c5.metric("System Mode", extraction_mode)
+
+
+    st.markdown("---")
+
+
+    # ---------------- CONFIG PANEL ---------------- #
+
+    st.subheader("⚙️ Configuration Control Center")
+
+    match_threshold = st.slider(
+        "Template Match Threshold",
+        0.0,
+        1.0,
+        0.55,
+        0.05
+    )
+
+    confidence_threshold = st.slider(
+        "Extraction Confidence Threshold",
+        0.5,
+        1.0,
+        0.80,
+        0.01
+    )
+
+    output_format = st.selectbox(
+        "Output Format",
+        ["JSON", "CSV", "Both"]
+    )
+
+    auto_approve = st.checkbox(
+        "Auto-approve high confidence results"
+    )
+
+    selected_model = st.selectbox(
+        "Model Override",
+        MODEL_OPTIONS_BY_PROVIDER.get(
+            st.session_state.get("ui_llm_provider", "openai"),
+            ["custom"]
+        )
+    )
+
+
+    st.markdown("---")
+
+
+    # ---------------- SYSTEM HEALTH ---------------- #
+
+    st.subheader("System Health")
+
+    result = st.session_state.get("last_result")
+    if result:
+
+        passed = sum(
+            1 for v in result.validation_results
+            if v.get("status") == "pass"
+        )
+
+        failed = sum(
+            1 for v in result.validation_results
+            if v.get("status") == "fail"
+        )
+
+        warnings = sum(
+            1 for v in result.validation_results
+            if v.get("status") == "warn"
+        )
+
+        st.success(f"Passed: {passed}")
+        st.error(f"Failed: {failed}")
+        st.warning(f"Warnings: {warnings}")
+
+
+        st.bar_chart(
+            pd.DataFrame({
+                "Status": ["Pass", "Fail", "Warn"],
+                "Count": [passed, failed, warnings]
+            }).set_index("Status")
+        )
+
+
+    st.markdown("---")
+
+
+    # ---------------- OPTIONAL TREND ---------------- #
+
+    st.subheader("Processing Trend")
+
+    trend_df = pd.DataFrame({
+        "Run": list(range(1, total_docs + 1)),
+        "Processed": [1] * total_docs
+    })
+
+    st.line_chart(trend_df.set_index("Run"))
+
+# ============================================================ #    
 
     with tab_single:
         render_single_tab(pipeline, extraction_mode, learn_from_upload)
