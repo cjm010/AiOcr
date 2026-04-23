@@ -9,5 +9,5 @@ def test_settings_build_data_dir(monkeypatch):
 
     settings = get_settings()
 
-    assert str(settings.data_dir).endswith("data/test")
+    assert settings.data_dir.parts[-2:] == ("data", "test")
     assert settings.app_env == "test"

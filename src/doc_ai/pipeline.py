@@ -10,14 +10,13 @@ from .parsers import DocumentParser
 from .schemas import PipelineResult
 from .storage import ResultStore
 from .template_memory import TemplateMemory
-from .validators import InvoiceValidator
+from .validators import get_validator
 
 
 class DocumentPipeline:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._parser = DocumentParser()
-        self._validator = InvoiceValidator()
         self._store = ResultStore(settings)
 
     def process_upload(
@@ -33,6 +32,11 @@ class DocumentPipeline:
             learn_from_upload=learn_from_upload,
         )
 
+    @staticmethod
+    def _compute_text_hash(text: str) -> str:
+        normalized = " ".join(text.lower().split())
+        return hashlib.sha256(normalized.encode()).hexdigest()
+
     def process_bytes(
         self,
         file_name: str,
@@ -40,7 +44,7 @@ class DocumentPipeline:
         extraction_mode: str = "adaptive-local",
         learn_from_upload: bool = True,
     ) -> PipelineResult:
-        saved_path, content_hash = self._save_upload(file_name, file_bytes)
+        saved_path, _file_hash = self._save_upload(file_name, file_bytes)
         errors: list[str] = []
         extraction_trace: list[str] = []
 
@@ -68,8 +72,29 @@ class DocumentPipeline:
                 },
                 errors=errors,
                 extraction_trace=extraction_trace,
-                content_hash=content_hash,
+                content_hash="",
                 needs_review=True,
+            )
+
+        content_hash = self._compute_text_hash(parsed_document.raw_text)
+
+        if self._store.has_been_processed(content_hash):
+            return PipelineResult(
+                source_file=saved_path.name,
+                upload_path=str(saved_path),
+                parsed_text=parsed_document.raw_text,
+                extracted_data={"document_type": "unknown", "source_file": saved_path.name},
+                validation_results=[],
+                output_files={},
+                summary={
+                    "source_file": saved_path.name,
+                    "extraction_mode": extraction_mode,
+                    "duplicate": True,
+                },
+                errors=["Duplicate: identical document content was already processed."],
+                extraction_trace=["Content hash matched an existing record — skipping re-processing."],
+                content_hash=content_hash,
+                needs_review=False,
             )
 
         extractor = build_extractor(extraction_mode, self._settings)
@@ -95,7 +120,7 @@ class DocumentPipeline:
             }
             extraction_trace.append(f"Extraction failed: {exc}")
 
-        validation_checks = self._validator.validate(extracted_data)
+        validation_checks = get_validator(extracted_data.get("document_type", "invoice")).validate(extracted_data)
         learned_template_name = self._learn_from_result(
             saved_path=saved_path,
             extraction_mode=extraction_mode,
@@ -147,6 +172,10 @@ class DocumentPipeline:
             "needs_review": needs_review,
         }
 
+        field_confidence = self._compute_field_confidence(
+            extracted_data, validation_checks, extraction_trace
+        )
+
         return PipelineResult(
             source_file=saved_path.name,
             upload_path=str(saved_path),
@@ -159,6 +188,7 @@ class DocumentPipeline:
             extraction_trace=extraction_trace,
             content_hash=content_hash,
             needs_review=needs_review,
+            field_confidence=field_confidence,
         )
 
     def is_already_processed(self, content_hash: str) -> bool:
@@ -173,12 +203,13 @@ class DocumentPipeline:
         extraction_mode: str = "adaptive-local",
         learn_from_upload: bool = True,
         approve_for_future_matching: bool = False,
+        content_hash: str = "",
     ) -> PipelineResult:
         saved_path = Path(upload_path)
         extraction_trace = ["Used human-reviewed corrections from the UI."]
         if approve_for_future_matching:
             extraction_trace.append("User explicitly approved this result for future matching.")
-        validation_checks = self._validator.validate(corrected_data)
+        validation_checks = get_validator(corrected_data.get("document_type", "invoice")).validate(corrected_data)
         learned_template_name = self._learn_from_result(
             saved_path=saved_path,
             extraction_mode=extraction_mode,
@@ -193,7 +224,7 @@ class DocumentPipeline:
         if learned_template_name:
             extraction_trace.append(f"Learned or updated template `{learned_template_name}` from reviewed data.")
 
-        output_files = self._store.persist(source_file, corrected_data, validation_checks, extraction_trace)
+        output_files = self._store.persist(source_file, corrected_data, validation_checks, extraction_trace, content_hash=content_hash)
         summary = {
             "source_file": source_file,
             "extraction_mode": extraction_mode,
@@ -207,6 +238,10 @@ class DocumentPipeline:
             "approved_for_future_matching": approve_for_future_matching,
         }
 
+        field_confidence = self._compute_field_confidence(
+            corrected_data, validation_checks, extraction_trace
+        )
+
         return PipelineResult(
             source_file=source_file,
             upload_path=upload_path,
@@ -217,6 +252,7 @@ class DocumentPipeline:
             summary=summary,
             errors=[],
             extraction_trace=extraction_trace,
+            field_confidence=field_confidence,
         )
 
     def _save_upload(self, file_name: str, file_bytes: bytes) -> tuple[Path, str]:
@@ -269,6 +305,56 @@ class DocumentPipeline:
         signature = TemplateMemory.build_signature(parsed_lines)
         template = memory.learn_template(saved_path.name, signature, extracted_data, parsed_lines)
         return template.get("template_name")
+
+    @staticmethod
+    def _compute_field_confidence(
+        extracted_data: dict,
+        validation_checks: list,
+        extraction_trace: list[str],
+    ) -> dict[str, float]:
+        """Return a 0–1 confidence score for every extracted field.
+
+        The score is built in two stages:
+        1. Presence: missing fields start at 0; present fields start at a
+           baseline that reflects how the value was obtained.
+        2. Validation adjustment: the worst validation outcome for a field
+           anchors the final score within that baseline's range.
+        """
+        # Determine extraction method from the trace so we can set baselines.
+        trace_lower = " ".join(extraction_trace).lower()
+        if "llm" in trace_lower or "openai" in trace_lower or "groq" in trace_lower:
+            base_present = 0.88
+        elif "learned template" in trace_lower or "applied" in trace_lower:
+            base_present = 0.82
+        elif "rule-based" in trace_lower or "regex" in trace_lower:
+            base_present = 0.72
+        else:
+            base_present = 0.75
+
+        # Map field → worst validation status across all checks for that field.
+        field_worst: dict[str, str] = {}
+        _precedence = {"pass": 2, "warn": 1, "fail": 0}
+        for check in validation_checks:
+            fname = getattr(check, "field", None) or check.get("field", "")
+            status = getattr(check, "status", None) or check.get("status", "warn")
+            if fname not in field_worst or _precedence.get(status, 1) < _precedence.get(field_worst[fname], 1):
+                field_worst[fname] = status
+
+        _status_multiplier = {"pass": 1.0, "warn": 0.75, "fail": 0.35}
+
+        confidence: dict[str, float] = {}
+        for key, value in extracted_data.items():
+            if key in ("document_type", "source_file"):
+                continue
+            if value in (None, "", [], {}):
+                confidence[key] = 0.0
+            elif key in field_worst:
+                multiplier = _status_multiplier[field_worst[key]]
+                confidence[key] = round(base_present * multiplier, 3)
+            else:
+                confidence[key] = base_present
+
+        return confidence
 
     @staticmethod
     def _has_required_field_passes(validation_checks: list) -> bool:

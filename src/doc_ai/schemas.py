@@ -38,4 +38,5 @@ class PipelineResult:
     extraction_trace: list[str] = field(default_factory=list)
     content_hash: str = ""
     needs_review: bool = False
+    field_confidence: dict[str, float] = field(default_factory=dict)
     processed_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
