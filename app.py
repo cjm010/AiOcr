@@ -1159,97 +1159,15 @@ def main() -> None:
     if extraction_mode == "llm-assisted" and runtime_settings.llm_provider not in ("ollama",) and not runtime_settings.openai_api_key:
         st.warning("No API key is active for the selected provider. `llm-assisted` mode will fall back to adaptive local extraction.")
 
-    tab_single, tab_bulk, tab_schema = st.tabs(["Single Document", "Bulk Upload", "Schema Settings"])
+    # Read admin control values from session state so they're available to all tabs.
+    # Widgets that write these keys live inside tab_admin below.
+    confidence_threshold = st.session_state.get("admin_confidence_threshold", 0.80)
+    output_format = st.session_state.get("admin_output_format", "Both")
+    auto_approve = st.session_state.get("admin_auto_approve", False)
 
-        # ===================== ADMIN DASHBOARD ===================== #
-
-    st.markdown("## 📊 Admin Dashboard")
-
-    # ---------------- DERIVED METRICS ---------------- #
-
-    total_docs = st.session_state.docs_processed_total
-    manual_reviews = st.session_state.manual_corrections_total
-    approvals = st.session_state.approvals_total
-    review_rate = round(manual_reviews / max(total_docs, 1) * 100, 1)
-
-
-    # ---------------- KPI ROW ---------------- #
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-
-    c1.metric("Docs Processed", total_docs)
-    c2.metric("Manual Corrections", manual_reviews)
-    c3.metric("Approvals", approvals)
-    c4.metric("Review Rate", f"{review_rate}%")
-    c5.metric("System Mode", extraction_mode)
-
-
-    st.markdown("---")
-
-
-    # ---------------- CONFIG PANEL ---------------- #
-
-    st.subheader("⚙️ Configuration Control Center")
-
-    st.slider("Template Match Threshold", 0.0, 1.0, 0.55, 0.05, key="admin_match_threshold")
-    confidence_threshold = st.slider("Extraction Confidence Threshold", 0.5, 1.0, 0.80, 0.01, key="admin_confidence_threshold")
-    output_format = st.selectbox("Output Format", ["JSON", "CSV", "Both"], key="admin_output_format")
-    auto_approve = st.checkbox("Auto-approve high confidence results", key="admin_auto_approve")
-
-
-    st.markdown("---")
-
-
-    # ---------------- SYSTEM HEALTH ---------------- #
-
-    st.subheader("System Health")
-
-    result = st.session_state.get("last_result")
-    if result:
-
-        passed = sum(
-            1 for v in result.validation_results
-            if v.get("status") == "pass"
-        )
-
-        failed = sum(
-            1 for v in result.validation_results
-            if v.get("status") == "fail"
-        )
-
-        warnings = sum(
-            1 for v in result.validation_results
-            if v.get("status") == "warn"
-        )
-
-        st.success(f"Passed: {passed}")
-        st.error(f"Failed: {failed}")
-        st.warning(f"Warnings: {warnings}")
-
-
-        st.bar_chart(
-            pd.DataFrame({
-                "Status": ["Pass", "Fail", "Warn"],
-                "Count": [passed, failed, warnings]
-            }).set_index("Status")
-        )
-
-
-    st.markdown("---")
-
-
-    # ---------------- OPTIONAL TREND ---------------- #
-
-    st.subheader("Processing Trend")
-
-    trend_df = pd.DataFrame({
-        "Run": list(range(1, total_docs + 1)),
-        "Processed": [1] * total_docs
-    })
-
-    st.line_chart(trend_df.set_index("Run"))
-
-# ============================================================ #    
+    tab_single, tab_bulk, tab_schema, tab_admin = st.tabs(
+        ["Single Document", "Bulk Upload", "Schema Settings", "Admin Dashboard"]
+    )
 
     with tab_single:
         render_single_tab(pipeline, extraction_mode, learn_from_upload, logger,
@@ -1264,6 +1182,67 @@ def main() -> None:
 
     with tab_schema:
         render_schema_settings_tab(runtime_settings)
+
+    with tab_admin:
+        render_admin_dashboard_tab(extraction_mode)
+
+
+def render_admin_dashboard_tab(extraction_mode: str) -> None:
+    st.header("Admin Dashboard")
+
+    # ---------------- DERIVED METRICS ---------------- #
+    total_docs = st.session_state.docs_processed_total
+    manual_reviews = st.session_state.manual_corrections_total
+    approvals = st.session_state.approvals_total
+    review_rate = round(manual_reviews / max(total_docs, 1) * 100, 1)
+
+    # ---------------- KPI ROW ---------------- #
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Docs Processed", total_docs)
+    c2.metric("Manual Corrections", manual_reviews)
+    c3.metric("Approvals", approvals)
+    c4.metric("Review Rate", f"{review_rate}%")
+    c5.metric("System Mode", extraction_mode)
+
+    st.divider()
+
+    # ---------------- CONFIG PANEL ---------------- #
+    st.subheader("Configuration")
+    st.slider("Template Match Threshold", 0.0, 1.0, 0.55, 0.05, key="admin_match_threshold")
+    st.slider("Extraction Confidence Threshold", 0.5, 1.0, 0.80, 0.01, key="admin_confidence_threshold")
+    st.selectbox("Output Format", ["JSON", "CSV", "Both"], key="admin_output_format")
+    st.checkbox("Auto-approve high confidence results", key="admin_auto_approve")
+
+    st.divider()
+
+    # ---------------- SYSTEM HEALTH ---------------- #
+    st.subheader("System Health")
+    result = st.session_state.get("last_result")
+    if result:
+        passed = sum(1 for v in result.validation_results if v.get("status") == "pass")
+        failed = sum(1 for v in result.validation_results if v.get("status") == "fail")
+        warnings = sum(1 for v in result.validation_results if v.get("status") == "warn")
+        st.success(f"Passed: {passed}")
+        st.error(f"Failed: {failed}")
+        st.warning(f"Warnings: {warnings}")
+        st.bar_chart(
+            pd.DataFrame({"Status": ["Pass", "Fail", "Warn"], "Count": [passed, failed, warnings]}).set_index("Status")
+        )
+    else:
+        st.info("Process a document to see validation health metrics here.")
+
+    st.divider()
+
+    # ---------------- PROCESSING TREND ---------------- #
+    st.subheader("Processing Trend")
+    if total_docs > 0:
+        trend_df = pd.DataFrame({
+            "Run": list(range(1, total_docs + 1)),
+            "Processed": [1] * total_docs,
+        })
+        st.line_chart(trend_df.set_index("Run"))
+    else:
+        st.info("No documents processed yet this session.")
 
 
 def render_schema_settings_tab(settings) -> None:
