@@ -1,0 +1,58 @@
+services:
+
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      # Point Ollama at the companion container instead of localhost
+      LLM_BASE_URL: http://ollama:11434/v1/
+    volumes:
+      # Persist all extracted data, learned templates, and the SQLite database
+      - app_data:/app/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      # Persist downloaded models so you only pull them once
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+    # -------------------------------------------------------------------------
+    # GPU support — uncomment the block below that matches your hardware.
+    # Leave both commented out to run Ollama on CPU (slower but works anywhere).
+    # -------------------------------------------------------------------------
+
+    # NVIDIA GPU (AWS g4dn/g5, RunPod, most gaming PCs):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+    # AMD GPU (ROCm):
+    # devices:
+    #   - /dev/kfd
+    #   - /dev/dri
+    # group_add:
+    #   - video
+
+volumes:
+  app_data:
+  ollama_models:

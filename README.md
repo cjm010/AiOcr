@@ -17,17 +17,22 @@ This project is a graduate capstone prototype designed around the sponsor brief 
 - support human-in-the-loop correction when extraction is incomplete
 - improve future results by learning reusable document patterns and approved corrections
 
-The current prototype focuses on invoice-like documents as the first milestone, but the code is structured so the team can later expand to other unstructured sources such as reports, agreements, and domain-specific records.
+The platform now supports five document types across healthcare, legal, and business domains, with a configurable database schema, per-field confidence scoring, and an admin dashboard for session monitoring and pipeline configuration.
 
 ## Core Capabilities
 
 - Streamlit web app for upload, review, and results
-- Open-source PDF/text parsing pipeline
+- Open-source PDF/text parsing pipeline (unstructured, pypdf, pdfplumber, Tesseract OCR fallback)
 - Adaptive extraction with template memory, rule-based fallback, and optional LLM assistance for unfamiliar layouts
-- Validation for required fields, dates, totals, and data-quality style checks
-- **Extraction completeness indicator** — displays a live % score and progress bar showing how many of the 9 expected fields were populated, with contextual guidance (Good / Partial / Low)
+- **Five document types**: invoices, medical discharge summaries, NDAs, lab reports, and business documents
+- Validation for required fields, dates, totals, and data-quality rules per document type
+- **Per-field confidence scores** — each extracted field shows a color-coded confidence badge (green ≥ 85%, orange ≥ 60%, red below that) in the review form
+- **Extraction completeness indicator** — progress bar showing filled vs. expected fields with contextual guidance (Good / Partial / Low)
+- **Admin dashboard** — live session KPIs (docs processed, corrections, approvals, review rate), configurable template match threshold, extraction confidence threshold, output format selector, and auto-approve toggle
+- **Database schema settings** — per-type flat SQLite tables with field-level checkbox configuration; DDL preview before saving
 - Human review workflow with PDF preview and copyable parsed text
 - Output persistence to JSON, CSV, SQLite, and extraction trace logs
+- Multi-provider LLM support: OpenAI, Groq, OpenRouter, Ollama, and Gemini
 - Colab notebook version for portable demos and collaboration
 
 ## Architecture Overview
@@ -146,6 +151,28 @@ After processing a document, the app provides:
 
 If no reliable match is found, or if extraction is incomplete, the user can enter the correct data directly. The approved data is then saved and can contribute to future template learning when validation quality is high enough.
 
+## Admin Dashboard
+
+The admin dashboard (visible below the main tabs) provides:
+
+- **Session KPIs** — docs processed, manual corrections, approvals, review rate, and active extraction mode
+- **Template Match Threshold** — slider to control the minimum similarity score before a learned template is applied (default 0.55)
+- **Extraction Confidence Threshold** — slider to set the minimum field confidence for auto-approval (default 0.80)
+- **Output Format** — selector to limit downloads to JSON, CSV, or both
+- **Auto-approve high confidence results** — when enabled, documents where all present fields meet the confidence threshold are approved without manual review in both single-file and bulk flows
+- **System Health** — validation pass/fail/warn counts and bar chart for the last processed document
+
+## Database Schema Settings
+
+The Schema Settings tab lets users control which extracted fields are saved to the per-type SQLite tables:
+
+- Required fields are always included and cannot be deselected
+- Optional fields can be toggled on or off per document type
+- A DDL preview shows the exact `CREATE TABLE` statement before saving
+- Changes take effect for documents processed after saving
+
+The five per-type tables are: `invoices`, `discharge_summaries`, `ndas`, `lab_reports`, `business_docs`.
+
 For stronger consistency on repeated uploads of the same format:
 
 - the LLM now uses a stricter JSON-only extraction request
@@ -154,18 +181,23 @@ For stronger consistency on repeated uploads of the same format:
 
 ## Project Layout
 
-- `app.py` - Streamlit UI and review workflow
-- `src/doc_ai/config.py` - app settings and local paths
-- `src/doc_ai/pipeline.py` - end-to-end orchestration
-- `src/doc_ai/parsers.py` - PDF and text parsing
-- `src/doc_ai/extractors.py` - adaptive, template-based, and rule-based extraction logic
-- `src/doc_ai/validators.py` - data quality rules
-- `src/doc_ai/storage.py` - JSON, CSV, SQLite, and trace persistence
-- `src/doc_ai/schemas.py` - shared data structures
-- `src/doc_ai/template_memory.py` - learned template signatures and anchors
-- `AI_Document_Extraction_Colab.ipynb` - Google Colab version of the project
+- `app.py` — Streamlit UI, admin dashboard, review workflow
+- `src/doc_ai/config.py` — app settings and local paths
+- `src/doc_ai/pipeline.py` — end-to-end orchestration and field confidence scoring
+- `src/doc_ai/parsers.py` — PDF and text parsing with OCR fallback
+- `src/doc_ai/extractors.py` — adaptive, template-based, and rule-based extraction for all five document types
+- `src/doc_ai/validators.py` — data quality rules per document type
+- `src/doc_ai/storage.py` — JSON, CSV, SQLite persistence (document-level and per-type flat tables)
+- `src/doc_ai/schemas.py` — shared data structures
+- `src/doc_ai/schema_config.py` — per-type field catalog, DB table names, and schema settings
+- `src/doc_ai/template_memory.py` — learned template signatures and anchors
+- `requirements.txt` — full runtime dependencies
+- `requirements-test.txt` — lean CI dependencies (no PDF/OCR/LLM stack)
+- `AI_Document_Extraction_Colab.ipynb` — Google Colab version of the project
 
 ## Quick Start
+
+### Option A — Run locally (no Docker)
 
 1. Install Python 3.11 or newer.
 2. Create and activate a virtual environment.
@@ -194,14 +226,89 @@ If you want to use `llm-assisted` mode, you can either:
 - enter your provider API key and choose a model directly in the Streamlit sidebar, or
 - set `LLM_PROVIDER`, `OPENAI_API_KEY`, and `OPENAI_MODEL` in your local environment or `.env`
 
-## Supported Inputs
+---
 
-- PDF invoices and similar unstructured business documents
-- `.txt` files
-- `.md` files
-- `.json` files
+### Option B — Run with Docker (portable, includes Ollama)
 
-Best results come from text-based PDFs. If a PDF does not contain a readable text layer, additional OCR support may be needed.
+Docker packages the entire app and a local Ollama LLM server into one command. No Python install needed on the target machine — just Docker.
+
+**Prerequisites:**
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows / Mac / Linux)
+
+**Steps:**
+
+1. Copy `.env.example` to `.env` and fill in any API keys you want to use (optional — Ollama works with no keys).
+
+2. Start everything:
+
+```bash
+docker compose up --build
+```
+
+3. Open your browser at `http://localhost:8501`.
+
+That's it. The app and Ollama start together. The first startup takes a few minutes while Docker builds the image.
+
+**Pull a model for Ollama (first time only):**
+
+In a separate terminal while the containers are running:
+
+```bash
+docker exec -it aiocr-ollama-1 ollama pull qwen2.5:7b
+```
+
+Swap `qwen2.5:7b` for any model from [ollama.com/library](https://ollama.com/library). Good starting points:
+
+| Model | Size | Good for |
+|---|---|---|
+| `qwen2.5:7b` | ~5 GB | Fast, solid extraction |
+| `qwen2.5:14b` | ~9 GB | Better accuracy |
+| `llama3.2:3b` | ~2 GB | Lightweight, quick |
+| `llama3.3:70b` | ~40 GB | Best quality, needs GPU |
+
+Then in the app sidebar: set **LLM provider** to `ollama` and **model** to the name you pulled (e.g. `qwen2.5:7b`).
+
+**GPU support:**
+
+By default Ollama runs on CPU. To enable GPU acceleration, open `docker-compose.yml` and uncomment the GPU block that matches your hardware (NVIDIA or AMD). On CPU, smaller models (3B–7B) run fine; larger models (14B+) will be slow.
+
+**Stop the app:**
+
+```bash
+docker compose down
+```
+
+Your data and downloaded models are preserved in Docker volumes and will be there next time you run `docker compose up`.
+
+**Deploy to a cloud server:**
+
+The same `docker compose up` command works on any Linux server. For GPU-accelerated Ollama on AWS:
+
+1. Launch an EC2 instance — `g4dn.xlarge` (NVIDIA T4, ~$0.53/hr) is a good starting point
+2. Install Docker: `curl -fsSL https://get.docker.com | sh`
+3. Clone this repo and copy your `.env`
+4. Uncomment the NVIDIA GPU block in `docker-compose.yml`
+5. `docker compose up --build -d`
+
+The app will be accessible at `http://<your-ec2-ip>:8501`.
+
+## Supported Document Types
+
+| Type | Key Extracted Fields |
+|---|---|
+| Invoice | vendor, invoice number, date, due date, line items, subtotal, tax, total |
+| Medical Discharge Summary | patient, dates, diagnoses, medications, discharge instructions, follow-up |
+| NDA | parties, agreement type, effective date, term, governing law, confidentiality scope |
+| Lab Report | patient, ordering physician, lab name, test panels with values and units, clinical interpretation |
+| Business Document | company, document subtype, report period, KPIs, executive summary, recommendations |
+
+## Supported File Formats
+
+- `.pdf` — text-based and scanned (OCR fallback via Tesseract)
+- `.txt`
+- `.md`
+- `.json`
 
 ## Extraction Modes
 
@@ -223,7 +330,7 @@ These modes represent the current implementation. The recommended choice for new
 
 When `llm-assisted` is selected, the UI lets a user:
 
-- choose a provider such as OpenAI, Groq, OpenRouter, or Ollama
+- choose a provider: OpenAI, Groq, OpenRouter, Ollama, or Gemini
 - paste an API key for the current session when the provider needs one
 - choose a recommended model from the sidebar
 - enter a custom model id when needed
@@ -293,10 +400,12 @@ This repo is set up for a three-environment flow:
 GitHub Actions included in this repo:
 
 - `.github/workflows/ci.yml`
-  - runs dependency install, import smoke checks, and tests on pull requests and pushes
+  - runs on Python 3.11 and 3.12 with Node.js 24
+  - installs lean test dependencies (`requirements-test.txt`) rather than the full PDF/OCR stack
+  - runs import smoke checks, pipeline tests, and UI tests on pull requests and pushes
 
 - `.github/workflows/release.yml`
-  - runs a protected production smoke check on `main`
+  - runs a protected production smoke check on `main` with full `requirements.txt`
 
 - `.github/workflows/promote-learning.yml`
   - manually promotes approved learning artifacts from `dev` or `test` into a higher environment

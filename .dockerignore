@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Data and outputs — mounted as a volume at runtime, not baked into the image
+data/
+
+# Tests and fixtures
+tests/fixtures/
+.pytest_cache/
+
+# Secrets
+.env
+*.key
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.github/
+
+# Jupyter
+*.ipynb_checkpoints/
