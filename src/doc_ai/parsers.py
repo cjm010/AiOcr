@@ -5,6 +5,10 @@ from pathlib import Path
 
 from .schemas import ParsedDocument
 
+# PDFs with fewer characters than this after text extraction are treated as
+# scanned images and sent through Tesseract OCR.
+_MIN_TEXT_CHARS = 100
+
 
 class DocumentParser:
     """Parses uploaded documents into plain text for downstream extraction."""
@@ -31,20 +35,55 @@ class DocumentParser:
 
     def _parse_pdf(self, file_path: Path) -> str:
         text = self._parse_pdf_with_unstructured(file_path)
-        if text:
+        if text and len(text) >= _MIN_TEXT_CHARS:
             return text
 
         text = self._parse_pdf_with_pypdf(file_path)
-        if text:
+        if text and len(text) >= _MIN_TEXT_CHARS:
             return text
 
         text = self._parse_pdf_with_pdfplumber(file_path)
+        if text and len(text) >= _MIN_TEXT_CHARS:
+            return text
+
+        # All text-based parsers returned too little content — treat as scanned.
+        text = self._parse_pdf_with_ocr(file_path)
         if text:
             return text
 
         raise RuntimeError(
-            "The PDF does not appear to contain extractable text. Try OCR with Tesseract or use a text-based PDF."
+            "Could not extract text from this PDF. The file may be corrupted or an unsupported format."
         )
+
+    def _parse_pdf_with_ocr(self, file_path: Path) -> str:
+        """Rasterize each PDF page and run Tesseract OCR on it."""
+        try:
+            import pypdfium2 as pdfium
+            import pytesseract
+            from PIL import Image
+        except ImportError:
+            return ""
+
+        try:
+            doc = pdfium.PdfDocument(str(file_path))
+        except Exception:
+            return ""
+
+        pages: list[str] = []
+        try:
+            for page in doc:
+                try:
+                    bitmap = page.render(scale=2.0)  # 2x scale → ~144 dpi, better OCR accuracy
+                    pil_image = bitmap.to_pil()
+                    page_text = pytesseract.image_to_string(pil_image).strip()
+                    if page_text:
+                        pages.append(page_text)
+                except Exception:
+                    continue
+        finally:
+            doc.close()
+
+        return "\n\n".join(pages).strip()
 
     def _parse_pdf_with_unstructured(self, file_path: Path) -> str:
         try:

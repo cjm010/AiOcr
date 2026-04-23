@@ -64,19 +64,73 @@ Every pull request should:
 - mention any risks
 - include screenshots for UI changes when possible
 
+## CI — Automated Tests
+
+Every pull request runs the full test suite automatically via GitHub Actions. Two suites must pass before a PR can be merged:
+
+| Suite | File | What it covers |
+|---|---|---|
+| Pipeline tests | `tests/test_pipeline.py` | Extraction, validation, deduplication, end-to-end pipeline |
+| UI tests | `tests/test_ui.py` | App startup, sidebar controls, file upload flows, bulk processing |
+
+Tests run on Python 3.11 and 3.12. A PR that fails any test on either version is blocked from merging.
+
+### Running tests locally before pushing
+
+```bash
+pytest tests/test_pipeline.py -v
+pytest tests/test_ui.py -v
+```
+
+Or run the full suite:
+
+```bash
+pytest -v
+```
+
+### Adding new tests
+
+- Pipeline / extraction logic → `tests/test_pipeline.py`
+- UI behaviour → `tests/test_ui.py`
+- Place fixture PDFs in `tests/fixtures/` — they are picked up automatically by the parametrized tests
+
+## Branch Protection Setup
+
+The following rules must be configured in **GitHub → Settings → Branches** for `dev`, `test`, and `main`. These enforce the CI gate and prevent direct pushes.
+
+### For `dev`
+
+1. Go to **Settings → Branches → Add rule**
+2. Branch name pattern: `dev`
+3. Enable **Require a pull request before merging**
+4. Enable **Require status checks to pass before merging**
+5. Search for and add these required status checks:
+   - `test (3.11)`
+   - `test (3.12)`
+6. Enable **Do not allow bypassing the above settings**
+
+### For `test`
+
+Same as `dev`, plus:
+
+- Enable **Require approvals** → set to **1 required reviewer**
+
+### For `main`
+
+Same as `test`, plus:
+
+- Increase **Require approvals** to **2 required reviewers**
+- Enable **Require branches to be up to date before merging**
+
+Once these rules are saved, GitHub will block any PR that has failing CI checks, and direct pushes to the protected branches will be rejected.
+
 ## Review Rules
 
-Simple and safe team rule:
-
-- `dev`
-  - at least 1 teammate review recommended
-
-- `test`
-  - at least 1 approval required
-
-- `main`
-  - at least 2 approvals required
-  - CI must pass
+| Branch | Approvals required | CI required |
+|---|---|---|
+| `dev` | 1 (recommended) | Yes — both suites must pass |
+| `test` | 1 (required) | Yes — both suites must pass |
+| `main` | 2 (required) | Yes — both suites must pass |
 
 ## Learning Data Safety
 
@@ -94,8 +148,8 @@ Rules:
 
 ## What Not To Do
 
-- do not push directly to `main`
-- do not merge failing CI into `test` or `main`
+- do not push directly to `main`, `test`, or `dev` — open a PR instead
+- do not merge failing CI into any protected branch
 - do not promote unreviewed learning artifacts
 - do not overwrite another teammate's work without checking first
 
@@ -103,8 +157,8 @@ Rules:
 
 Quick checklist:
 
-- code runs
-- tests pass
-- README or docs updated if needed
-- no secrets included
-- no `__pycache__`, `.venv`, or local data files included
+- [ ] code runs locally
+- [ ] `pytest` passes with no failures
+- [ ] README or docs updated if needed
+- [ ] no secrets included
+- [ ] no `__pycache__`, `.venv`, or local data files included
