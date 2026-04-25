@@ -18,7 +18,7 @@ from src.doc_ai.config import get_settings
 from src.doc_ai.extractors import RateLimitRetry
 from src.doc_ai.logging_config import setup_logging
 from src.doc_ai.pipeline import DocumentPipeline
-from src.doc_ai.schema_config import FIELD_CATALOG, SchemaConfig
+from src.doc_ai.schema_config import FIELD_CATALOG, SchemaConfig, TABLE_NAMES
 
 
 st.set_page_config(
@@ -126,6 +126,16 @@ LIST_FIELDS_BY_TYPE: dict[str, list[str]] = {
 def _fields_for(doc_type: str) -> tuple[list[str], set[str]]:
     return FIELDS_BY_TYPE.get(doc_type, FIELDS_BY_TYPE["invoice"])
 
+
+def _is_filled(v) -> bool:
+    return v not in (None, "", "null")
+
+
+def _clear_bulk_batch() -> None:
+    st.session_state["bulk_batch_id"] = st.session_state.get("bulk_batch_id", 0) + 1
+    for key in ("bulk_approved", "bulk_flagged", "bulk_summary_rows", "bulk_status_lines", "bulk_reviewed"):
+        st.session_state.pop(key, None)
+
 LLM_PROVIDER_OPTIONS = ["openai", "groq", "openrouter", "ollama", "gemini"]
 
 MODEL_OPTIONS_BY_PROVIDER = {
@@ -170,13 +180,14 @@ def render_pdf_preview(upload_path: str) -> None:
         st.info("PDF preview is only available for uploaded PDF files.")
         return
 
+    pdf_bytes = path.read_bytes()
     try:
         page_images = render_pdf_pages(upload_path)
     except Exception as exc:
         st.warning(f"PDF preview could not be rendered in-app: {exc}")
         st.download_button(
             "Download PDF",
-            data=path.read_bytes(),
+            data=pdf_bytes,
             file_name=path.name,
             mime="application/pdf",
             use_container_width=True,
@@ -193,7 +204,7 @@ def render_pdf_preview(upload_path: str) -> None:
 
     st.download_button(
         "Download original PDF",
-        data=path.read_bytes(),
+        data=pdf_bytes,
         file_name=path.name,
         mime="application/pdf",
         use_container_width=True,
@@ -236,9 +247,6 @@ def _line_items_to_json(items) -> str:
 
 
 def render_completeness_bar(extracted_data: dict) -> None:
-    def _is_filled(v):
-        return v not in (None, "", "null")
-
     doc_type = extracted_data.get("document_type", "invoice")
     field_order, optional_fields = _fields_for(doc_type)
     list_fields = LIST_FIELDS_BY_TYPE.get(doc_type, [])
@@ -526,7 +534,6 @@ def _run_bulk_processing(
             break
         max_wait = max(r["retry_after"] for r in pending)
         _rate_limit_countdown(rate_limit_placeholder, max_wait, n_files=len(pending))
-        # Remove "will retry" lines and replace with fresh status after retry
         pending = _run_pass([r["item"] for r in pending])
 
     # Any still rate-limited after all retries → mark as failed
@@ -655,22 +662,20 @@ def render_single_tab(
         st.session_state["last_processed_signature"] = current_upload_signature
         st.session_state.docs_processed_total += 1
 
-        if auto_approve and not result.errors:
-            present = [c for c in result.field_confidence.values() if c > 0]
-            if present and min(present) >= confidence_threshold:
-                reviewed = pipeline.finalize_review(
-                    source_file=result.source_file,
-                    upload_path=result.upload_path,
-                    parsed_text=result.parsed_text,
-                    corrected_data=result.extracted_data,
-                    extraction_mode=extraction_mode,
-                    learn_from_upload=learn_from_upload,
-                    approve_for_future_matching=True,
-                    content_hash=result.content_hash,
-                )
-                st.session_state["last_result"] = reviewed
-                st.session_state.approvals_total += 1
-                st.rerun()
+        if auto_approve and _is_bulk_auto_approvable(result, confidence_threshold, apply_confidence_gate=True):
+            reviewed = pipeline.finalize_review(
+                source_file=result.source_file,
+                upload_path=result.upload_path,
+                parsed_text=result.parsed_text,
+                corrected_data=result.extracted_data,
+                extraction_mode=extraction_mode,
+                learn_from_upload=learn_from_upload,
+                approve_for_future_matching=True,
+                content_hash=result.content_hash,
+            )
+            st.session_state["last_result"] = reviewed
+            st.session_state.approvals_total += 1
+            st.rerun()
 
 
     result = st.session_state.get("last_result")
@@ -754,8 +759,6 @@ def _render_bulk_results(
     m4.metric("Skipped / failed", len(duplicates) + len(failures))
 
     def _summary_row(r, status_label: str) -> dict:
-        def _is_filled(v):
-            return v not in (None, "", "null")
         _dt = r.extracted_data.get("document_type", "invoice")
         _fo, _opt = _fields_for(_dt)
         filled = sum(1 for f in _fo if _is_filled(r.extracted_data.get(f)))
@@ -934,10 +937,7 @@ def render_bulk_tab(
 
     if uploaded_files:
         if st.button("Clear files", key="bulk_clear_files"):
-            st.session_state["bulk_batch_id"] = st.session_state.get("bulk_batch_id", 0) + 1
-            st.session_state.pop("bulk_approved", None)
-            st.session_state.pop("bulk_flagged", None)
-            st.session_state.pop("bulk_summary_rows", None)
+            _clear_bulk_batch()
             st.rerun()
 
     if not uploaded_files:
@@ -953,10 +953,7 @@ def render_bulk_tab(
         _render_bulk_results(approved, flagged, pipeline, extraction_mode, learn_from_upload,
                              raw_results=st.session_state.get("bulk_summary_rows"))
         if st.button("Process another batch", use_container_width=True):
-            st.session_state["bulk_batch_id"] = st.session_state.get("bulk_batch_id", 0) + 1
-            st.session_state.pop("bulk_approved", None)
-            st.session_state.pop("bulk_flagged", None)
-            st.session_state.pop("bulk_summary_rows", None)
+            _clear_bulk_batch()
             st.rerun()
         return
 
@@ -1026,11 +1023,7 @@ def render_bulk_tab(
         _render_bulk_results(approved_done, flagged_done, pipeline, extraction_mode, learn_from_upload,
                              raw_results=st.session_state.get("bulk_summary_rows"))
         if st.button("Process another batch", use_container_width=True):
-            st.session_state["bulk_batch_id"] = st.session_state.get("bulk_batch_id", 0) + 1
-            st.session_state.pop("bulk_approved", None)
-            st.session_state.pop("bulk_flagged", None)
-            st.session_state.pop("bulk_summary_rows", None)
-            st.session_state.pop("bulk_status_lines", None)
+            _clear_bulk_batch()
             st.rerun()
 
 
@@ -1151,9 +1144,10 @@ def main() -> None:
                     st.session_state.pop("confirm_reset", None)
                     st.rerun()
 
-    runtime_settings = resolve_runtime_settings(settings)
-    _match_threshold = st.session_state.get("admin_match_threshold", 0.55)
-    runtime_settings = replace(runtime_settings, min_learning_pass_ratio=_match_threshold)
+    runtime_settings = replace(
+        resolve_runtime_settings(settings),
+        min_learning_pass_ratio=st.session_state.get("admin_match_threshold", 0.55),
+    )
     pipeline = DocumentPipeline(runtime_settings)
 
     if extraction_mode == "llm-assisted" and runtime_settings.llm_provider not in ("ollama",) and not runtime_settings.openai_api_key:
@@ -1236,11 +1230,7 @@ def render_admin_dashboard_tab(extraction_mode: str) -> None:
     # ---------------- PROCESSING TREND ---------------- #
     st.subheader("Processing Trend")
     if total_docs > 0:
-        trend_df = pd.DataFrame({
-            "Run": list(range(1, total_docs + 1)),
-            "Processed": [1] * total_docs,
-        })
-        st.line_chart(trend_df.set_index("Run"))
+        st.line_chart({"Processed": [1] * total_docs})
     else:
         st.info("No documents processed yet this session.")
 
@@ -1270,7 +1260,7 @@ def render_schema_settings_tab(settings) -> None:
         current_selected = set(schema_cfg.get_selected_fields(doc_type))
 
         with st.expander(f"{label}  —  {len(current_selected)} field(s) selected", expanded=False):
-            st.markdown(f"**Table:** `{_table_name_for(doc_type)}`")
+            st.markdown(f"**Table:** `{TABLE_NAMES.get(doc_type, doc_type)}`")
             st.caption("System columns `id`, `source_file`, `original_filename`, `content_hash`, `processed_at` are always present.")
             st.divider()
 
@@ -1306,11 +1296,6 @@ def render_schema_settings_tab(settings) -> None:
         schema_cfg.save()
         st.success("Schema settings saved. New extractions will use the updated field selection.")
         st.rerun()
-
-
-def _table_name_for(doc_type: str) -> str:
-    from src.doc_ai.schema_config import TABLE_NAMES
-    return TABLE_NAMES.get(doc_type, doc_type)
 
 
 if __name__ == "__main__":

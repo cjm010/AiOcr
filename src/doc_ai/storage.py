@@ -21,12 +21,16 @@ class ResultStore:
         self._schema_config = SchemaConfig(settings.data_dir / "schema_settings.json")
         self._migrate_schema()
 
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self._settings.database_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
     def _migrate_schema(self) -> None:
         db = self._settings.database_path
         if not Path(db).exists():
             return
-        conn = sqlite3.connect(db)
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = self._connect()
         try:
             conn.execute("ALTER TABLE document_results ADD COLUMN content_hash TEXT DEFAULT ''")
             conn.commit()
@@ -36,10 +40,9 @@ class ResultStore:
             conn.close()
 
     def has_been_processed(self, content_hash: str) -> bool:
-        db = self._settings.database_path
-        if not Path(db).exists():
+        if not Path(self._settings.database_path).exists():
             return False
-        conn = sqlite3.connect(db)
+        conn = self._connect()
         try:
             cursor = conn.execute(
                 "SELECT 1 FROM document_results WHERE content_hash = ? LIMIT 1",
@@ -108,8 +111,7 @@ class ResultStore:
         content_hash: str = "",
         original_filename: str = "",
     ) -> None:
-        conn = sqlite3.connect(self._settings.database_path)
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn = self._connect()
         try:
             serialized = {
                 k: json.dumps(v) if isinstance(v, (list, dict)) else v
