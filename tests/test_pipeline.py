@@ -747,6 +747,12 @@ class TestPipelineEndToEnd:
 # Parametrized tests against real fixture files
 # ---------------------------------------------------------------------------
 
+_PDF_LIBS_AVAILABLE = any(
+    __import__("importlib").util.find_spec(lib) is not None
+    for lib in ("pypdf", "pdfplumber", "unstructured")
+)
+
+
 def _fixture_pdfs():
     if not FIXTURES.exists():
         return []
@@ -756,24 +762,25 @@ def _fixture_pdfs():
 @pytest.mark.parametrize("fixture_path", _fixture_pdfs(), ids=lambda p: p.name)
 def test_fixture_file_extracts_without_error(fixture_path, tmp_path):
     """Every file in tests/fixtures/ must process without a pipeline crash."""
+    if fixture_path.suffix == ".pdf" and not _PDF_LIBS_AVAILABLE:
+        pytest.skip("PDF parsing libraries not installed in this environment")
     pipeline = _make_pipeline(tmp_path)
     file_bytes = fixture_path.read_bytes()
     result = pipeline.process_bytes(fixture_path.name, file_bytes)
 
-    # Should always produce a content hash and extracted_data
     assert result.content_hash != "" or result.summary.get("duplicate")
     assert isinstance(result.extracted_data, dict)
-    # document_type is present for all supported types; invoice_number only for invoices
     assert "document_type" in result.extracted_data or result.errors
 
 
 @pytest.mark.parametrize("fixture_path", _fixture_pdfs(), ids=lambda p: p.name)
 def test_fixture_file_no_crash_on_duplicate(fixture_path, tmp_path):
     """Processing the same fixture twice must return duplicate=True, not crash."""
+    if fixture_path.suffix == ".pdf" and not _PDF_LIBS_AVAILABLE:
+        pytest.skip("PDF parsing libraries not installed in this environment")
     pipeline = _make_pipeline(tmp_path)
     file_bytes = fixture_path.read_bytes()
     pipeline.process_bytes(fixture_path.name, file_bytes)
-    # Rename keeping the same extension so the parser handles it identically
     copy_name = f"copy_of_{fixture_path.name}"
     r2 = pipeline.process_bytes(copy_name, file_bytes)
     assert r2.summary.get("duplicate") is True
