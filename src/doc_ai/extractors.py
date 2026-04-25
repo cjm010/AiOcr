@@ -517,14 +517,7 @@ class RuleBasedInvoiceExtractor(BaseExtractor):
                     extracted[field] = match.group("value").strip()
                     break
 
-        for money_field in ("subtotal", "tax", "shipping_handling", "total_amount"):
-            value = extracted.get(money_field)
-            if value is not None:
-                try:
-                    extracted[money_field] = float(str(value).replace(",", "").replace("$", ""))
-                except ValueError:
-                    pass
-
+        _coerce_money_fields(extracted)
         extracted["line_items"] = _extract_line_items(text)
         return extracted
 
@@ -753,15 +746,7 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
         extracted["source_file"] = parsed_document.file_name
 
         if doc_type == "invoice":
-            for money_field in ("subtotal", "tax", "shipping_handling", "total_amount"):
-                value = extracted.get(money_field)
-                if value in (None, ""):
-                    extracted[money_field] = None
-                    continue
-                try:
-                    extracted[money_field] = float(str(value).replace(",", "").replace("$", ""))
-                except ValueError:
-                    pass
+            _coerce_money_fields(extracted)
             if not isinstance(extracted.get("line_items"), list):
                 extracted["line_items"] = []
         elif doc_type == "medical_discharge":
@@ -971,14 +956,7 @@ def _extract_from_template(template: dict[str, Any], raw_text: str) -> dict[str,
         value = match.groupdict().get("value") or match.group(0)
         extracted[field] = value.strip()
 
-    for money_field in ("subtotal", "tax", "shipping_handling", "total_amount"):
-        value = extracted.get(money_field)
-        if value not in (None, ""):
-            try:
-                extracted[money_field] = float(str(value).replace(",", "").replace("$", ""))
-            except ValueError:
-                continue
-
+    _coerce_money_fields(extracted)
     if not extracted.get("line_items"):
         extracted["line_items"] = _extract_line_items(raw_text)
 
@@ -1018,6 +996,21 @@ def _needs_llm_fallback(extracted: dict[str, Any]) -> bool:
     required_fields = ("vendor_name", "invoice_number", "invoice_date", "total_amount")
     missing_required = sum(1 for field in required_fields if extracted.get(field) in (None, "", []))
     return missing_required >= 1
+
+
+_MONEY_FIELDS = ("subtotal", "tax", "shipping_handling", "total_amount")
+
+
+def _coerce_money_fields(extracted: dict[str, Any]) -> None:
+    for field in _MONEY_FIELDS:
+        value = extracted.get(field)
+        if value in (None, ""):
+            extracted[field] = None
+            continue
+        try:
+            extracted[field] = float(str(value).replace(",", "").replace("$", ""))
+        except ValueError:
+            pass
 
 
 def _strip_json_fence(content: str) -> str:

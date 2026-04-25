@@ -257,9 +257,8 @@ class DocumentPipeline:
 
     def _save_upload(self, file_name: str, file_bytes: bytes) -> tuple[Path, str]:
         content_hash = hashlib.sha256(file_bytes).hexdigest()
-        stem = Path(file_name).stem
-        suffix = Path(file_name).suffix
-        saved_name = f"{stem}_{content_hash[:8]}{suffix}"
+        p = Path(file_name)
+        saved_name = f"{p.stem}_{content_hash[:8]}{p.suffix}"
         destination = self._settings.upload_dir / saved_name
         destination.write_bytes(file_bytes)
         return destination, content_hash
