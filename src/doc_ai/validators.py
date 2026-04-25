@@ -18,25 +18,42 @@ def get_validator(doc_type: str):
     return InvoiceValidator()
 
 
-class InvoiceValidator:
-    REQUIRED_FIELDS = ("vendor_name", "invoice_number", "invoice_date", "total_amount")
+def _is_valid_date(value: str) -> bool:
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            datetime.strptime(value, fmt)
+            return True
+        except ValueError:
+            continue
+    return False
 
-    def validate(self, extracted_data: dict[str, Any]) -> list[ValidationCheck]:
+
+class BaseValidator:
+    REQUIRED_FIELDS: tuple[str, ...] = ()
+
+    def _check_required_fields(self, extracted_data: dict[str, Any]) -> list[ValidationCheck]:
         checks: list[ValidationCheck] = []
-
         for field in self.REQUIRED_FIELDS:
             value = extracted_data.get(field)
             if value in (None, "", []):
                 checks.append(ValidationCheck(field=field, status="fail", message="Required field is missing."))
             else:
                 checks.append(ValidationCheck(field=field, status="pass", message="Required field is present."))
+        return checks
+
+
+class InvoiceValidator(BaseValidator):
+    REQUIRED_FIELDS = ("vendor_name", "invoice_number", "invoice_date", "total_amount")
+
+    def validate(self, extracted_data: dict[str, Any]) -> list[ValidationCheck]:
+        checks = self._check_required_fields(extracted_data)
 
         for field in ("invoice_date", "due_date"):
             value = extracted_data.get(field)
             if not value:
                 checks.append(ValidationCheck(field=field, status="warn", message="No date provided."))
                 continue
-            if self._is_valid_date(str(value)):
+            if _is_valid_date(str(value)):
                 checks.append(ValidationCheck(field=field, status="pass", message="Date format is valid."))
             else:
                 checks.append(
@@ -71,29 +88,12 @@ class InvoiceValidator:
 
         return checks
 
-    @staticmethod
-    def _is_valid_date(value: str) -> bool:
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
-            try:
-                datetime.strptime(value, fmt)
-                return True
-            except ValueError:
-                continue
-        return False
 
-
-class MedicalDischargeValidator:
+class MedicalDischargeValidator(BaseValidator):
     REQUIRED_FIELDS = ("patient_name", "admission_date", "discharge_date", "primary_diagnosis")
 
     def validate(self, extracted_data: dict[str, Any]) -> list[ValidationCheck]:
-        checks: list[ValidationCheck] = []
-
-        for field in self.REQUIRED_FIELDS:
-            value = extracted_data.get(field)
-            if value in (None, "", []):
-                checks.append(ValidationCheck(field=field, status="fail", message="Required field is missing."))
-            else:
-                checks.append(ValidationCheck(field=field, status="pass", message="Required field is present."))
+        checks = self._check_required_fields(extracted_data)
 
         for date_field in ("admission_date", "discharge_date", "follow_up_date", "date_of_birth"):
             value = extracted_data.get(date_field)
@@ -101,7 +101,7 @@ class MedicalDischargeValidator:
                 if date_field in ("admission_date", "discharge_date"):
                     checks.append(ValidationCheck(field=date_field, status="warn", message="No date provided."))
                 continue
-            if InvoiceValidator._is_valid_date(str(value)):
+            if _is_valid_date(str(value)):
                 checks.append(ValidationCheck(field=date_field, status="pass", message="Date format is valid."))
             else:
                 checks.append(ValidationCheck(field=date_field, status="fail",
@@ -134,25 +134,18 @@ class MedicalDischargeValidator:
         return checks
 
 
-class NDAValidator:
+class NDAValidator(BaseValidator):
     REQUIRED_FIELDS = ("disclosing_party", "receiving_party", "agreement_date")
 
     def validate(self, extracted_data: dict[str, Any]) -> list[ValidationCheck]:
-        checks: list[ValidationCheck] = []
-
-        for field in self.REQUIRED_FIELDS:
-            value = extracted_data.get(field)
-            if value in (None, "", []):
-                checks.append(ValidationCheck(field=field, status="fail", message="Required field is missing."))
-            else:
-                checks.append(ValidationCheck(field=field, status="pass", message="Required field is present."))
+        checks = self._check_required_fields(extracted_data)
 
         for date_field in ("agreement_date", "effective_date", "expiration_date"):
             value = extracted_data.get(date_field)
             if not value:
                 checks.append(ValidationCheck(field=date_field, status="warn", message="No date provided."))
                 continue
-            if InvoiceValidator._is_valid_date(str(value)):
+            if _is_valid_date(str(value)):
                 checks.append(ValidationCheck(field=date_field, status="pass", message="Date format is valid."))
             else:
                 checks.append(ValidationCheck(field=date_field, status="fail",
@@ -176,25 +169,18 @@ class NDAValidator:
         return checks
 
 
-class LabReportValidator:
+class LabReportValidator(BaseValidator):
     REQUIRED_FIELDS = ("patient_name",)
 
     def validate(self, extracted_data: dict[str, Any]) -> list[ValidationCheck]:
-        checks: list[ValidationCheck] = []
-
-        for field in self.REQUIRED_FIELDS:
-            value = extracted_data.get(field)
-            if value in (None, "", []):
-                checks.append(ValidationCheck(field=field, status="fail", message="Required field is missing."))
-            else:
-                checks.append(ValidationCheck(field=field, status="pass", message="Required field is present."))
+        checks = self._check_required_fields(extracted_data)
 
         for date_field in ("collected_date", "reported_date"):
             value = extracted_data.get(date_field)
             if not value:
                 checks.append(ValidationCheck(field=date_field, status="warn", message="No date provided."))
                 continue
-            if InvoiceValidator._is_valid_date(str(value)):
+            if _is_valid_date(str(value)):
                 checks.append(ValidationCheck(field=date_field, status="pass", message="Date format is valid."))
             else:
                 checks.append(ValidationCheck(field=date_field, status="warn",
@@ -219,18 +205,11 @@ class LabReportValidator:
         return checks
 
 
-class BusinessDocValidator:
+class BusinessDocValidator(BaseValidator):
     REQUIRED_FIELDS = ("company_name",)
 
     def validate(self, extracted_data: dict[str, Any]) -> list[ValidationCheck]:
-        checks: list[ValidationCheck] = []
-
-        for field in self.REQUIRED_FIELDS:
-            value = extracted_data.get(field)
-            if value in (None, "", []):
-                checks.append(ValidationCheck(field=field, status="fail", message="Required field is missing."))
-            else:
-                checks.append(ValidationCheck(field=field, status="pass", message="Required field is present."))
+        checks = self._check_required_fields(extracted_data)
 
         for optional in ("document_subtype", "report_period", "prepared_by"):
             value = extracted_data.get(optional)
