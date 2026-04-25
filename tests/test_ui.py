@@ -21,6 +21,11 @@ from streamlit.testing.v1 import AppTest
 APP_PATH = str(Path(__file__).resolve().parents[1] / "app.py")
 FIXTURES = Path(__file__).parent / "fixtures"
 
+_PDF_LIBS_AVAILABLE = any(
+    __import__("importlib").util.find_spec(lib) is not None
+    for lib in ("pypdf", "pdfplumber", "unstructured")
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -719,6 +724,8 @@ class TestReviewFormConfidenceBadges:
         pdf = _pdf("invoice_001.pdf")
         if not pdf.exists():
             pytest.skip("invoice_001.pdf not in fixtures")
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF parsing libraries not installed in this environment")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -738,6 +745,8 @@ class TestReviewFormConfidenceBadges:
         pdf = _pdf("invoice_001.pdf")
         if not pdf.exists():
             pytest.skip("invoice_001.pdf not in fixtures")
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF parsing libraries not installed in this environment")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -752,10 +761,11 @@ class TestReviewFormConfidenceBadges:
 
     def test_review_form_shows_red_for_missing_field(self, tmp_path):
         """A field that could not be extracted should get a red 'not extracted' badge."""
-        # Use a medical discharge PDF — some fields like follow_up_provider are often missing
         pdf = _pdf("healthcare_discharge_001.pdf")
         if not pdf.exists():
             pytest.skip("healthcare_discharge_001.pdf not in fixtures")
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF parsing libraries not installed in this environment")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -773,6 +783,8 @@ class TestReviewFormConfidenceBadges:
         pdfs = [_pdf("invoice_001.pdf"), _pdf("invoice_002.pdf")]
         if not all(p.exists() for p in pdfs):
             pytest.skip("invoice_001/002.pdf not in fixtures")
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF parsing libraries not installed in this environment")
         at = _app(tmp_path)
         at.run()
         _bulk_uploader(at).set_value([_upload(p) for p in pdfs]).run()
