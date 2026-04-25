@@ -4,26 +4,25 @@ on:
   pull_request:
     branches: [dev, test, main]
   push:
-    branches: [dev, test, main]
+    branches: [dev]
 
 jobs:
   test:
+    name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "24"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -39,15 +38,9 @@ jobs:
         env:
           APP_ENV: ci
           ENABLE_TEMPLATE_LEARNING: "false"
-        run: |
-          python -c "from src.doc_ai.config import get_settings; from src.doc_ai.pipeline import DocumentPipeline; s = get_settings(); DocumentPipeline(s); print(s.data_dir)"
+        run: python -c "from src.doc_ai.config import get_settings; from src.doc_ai.pipeline import DocumentPipeline; s = get_settings(); DocumentPipeline(s); print(s.data_dir)"
 
-      - name: Run pipeline tests
+      - name: Run tests
         env:
           APP_ENV: ci
-        run: pytest tests/test_pipeline.py -v
-
-      - name: Run UI tests
-        env:
-          APP_ENV: ci
-        run: pytest tests/test_ui.py -v
+        run: pytest tests/ -v
