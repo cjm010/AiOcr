@@ -36,6 +36,87 @@ class ResultStore:
             conn.commit()
         except sqlite3.OperationalError:
             pass  # Column already exists or table not yet created — both are fine
+        try:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS pdf_uploads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    original_filename TEXT NOT NULL,
+                    upload_path TEXT,
+                    file_size_bytes INTEGER,
+                    processed_at TEXT DEFAULT (datetime('now'))
+                );
+                CREATE TABLE IF NOT EXISTS error_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    error_type TEXT NOT NULL,
+                    source TEXT,
+                    severity TEXT DEFAULT 'error',
+                    message TEXT,
+                    logged_at TEXT DEFAULT (datetime('now'))
+                );
+            """)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+
+    def log_upload(self, original_filename: str, upload_path: str, file_size_bytes: int) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO pdf_uploads (original_filename, upload_path, file_size_bytes) VALUES (?, ?, ?)",
+                (original_filename, upload_path, file_size_bytes),
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+
+    def log_error(self, error_type: str, source: str, message: str, severity: str = "error") -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO error_log (error_type, source, severity, message) VALUES (?, ?, ?, ?)",
+                (error_type, source, severity, message),
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+
+    def get_error_log(self, limit: int = 200) -> list[dict]:
+        if not Path(self._settings.database_path).exists():
+            return []
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "SELECT logged_at, severity, error_type, source, message "
+                "FROM error_log ORDER BY logged_at DESC LIMIT ?",
+                (limit,),
+            )
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            conn.close()
+
+    def get_upload_log(self, limit: int = 200) -> list[dict]:
+        if not Path(self._settings.database_path).exists():
+            return []
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "SELECT processed_at, original_filename, upload_path, file_size_bytes "
+                "FROM pdf_uploads ORDER BY processed_at DESC LIMIT ?",
+                (limit,),
+            )
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            return []
         finally:
             conn.close()
 

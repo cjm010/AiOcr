@@ -255,6 +255,12 @@ class DocumentPipeline:
             field_confidence=field_confidence,
         )
 
+    def log_error(self, error_type: str, source: str, message: str, severity: str = "error") -> None:
+        self._store.log_error(error_type, source, message, severity)
+
+    def log_upload(self, original_filename: str, upload_path: str, file_size_bytes: int) -> None:
+        self._store.log_upload(original_filename, upload_path, file_size_bytes)
+
     def _save_upload(self, file_name: str, file_bytes: bytes) -> tuple[Path, str]:
         content_hash = hashlib.sha256(file_bytes).hexdigest()
         p = Path(file_name)
