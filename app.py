@@ -1191,6 +1191,21 @@ def render_admin_dashboard_tab(extraction_mode: str, settings) -> None:
 
     st.header("Admin Dashboard")
 
+    # ---------------- KPI METRICS ---------------- #
+    docs_processed = st.session_state.get("docs_processed_total", 0)
+    corrections = st.session_state.get("manual_corrections_total", 0)
+    approvals = st.session_state.get("approvals_total", 0)
+    review_rate = f"{(corrections / docs_processed * 100):.1f}%" if docs_processed else "—"
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Docs Processed", docs_processed)
+    k2.metric("Manual Corrections", corrections)
+    k3.metric("Approvals", approvals)
+    k4.metric("Review Rate", review_rate)
+    k5.metric("System Mode", extraction_mode)
+
+    st.divider()
+
     # ---------------- MODEL CONFIGURATION ---------------- #
     st.subheader("Model Configuration")
     st.info(f"Active extraction mode: **{extraction_mode}**. Change via the Pipeline settings sidebar.")
