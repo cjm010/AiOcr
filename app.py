@@ -653,10 +653,14 @@ def render_single_tab(
                     return
             except Exception as exc:
                 logger.error("FAILED file=%s error=%s", uploaded_file.name, exc)
+                pipeline.log_error("infrastructure", uploaded_file.name, str(exc))
                 st.error(f"Pipeline failed unexpectedly: {exc}")
                 return
         if result is None:
             return
+        pipeline.log_upload(uploaded_file.name, result.upload_path, len(uploaded_bytes))
+        for err in result.errors:
+            pipeline.log_error("document_processing", uploaded_file.name, err, severity="warning")
         st.session_state["last_result"] = result
         st.session_state["last_uploaded_name"] = uploaded_file.name
         st.session_state["last_processed_signature"] = current_upload_signature
@@ -1178,61 +1182,111 @@ def main() -> None:
         render_schema_settings_tab(runtime_settings)
 
     with tab_admin:
-        render_admin_dashboard_tab(extraction_mode)
+        render_admin_dashboard_tab(extraction_mode, runtime_settings)
 
 
-def render_admin_dashboard_tab(extraction_mode: str) -> None:
+def render_admin_dashboard_tab(extraction_mode: str, settings) -> None:
+    from src.doc_ai.storage import ResultStore
+    store = ResultStore(settings)
+
     st.header("Admin Dashboard")
 
-    # ---------------- DERIVED METRICS ---------------- #
-    total_docs = st.session_state.docs_processed_total
-    manual_reviews = st.session_state.manual_corrections_total
-    approvals = st.session_state.approvals_total
-    review_rate = round(manual_reviews / max(total_docs, 1) * 100, 1)
+    # ---------------- KPI METRICS ---------------- #
+    docs_processed = st.session_state.get("docs_processed_total", 0)
+    corrections = st.session_state.get("manual_corrections_total", 0)
+    approvals = st.session_state.get("approvals_total", 0)
+    review_rate = f"{(corrections / docs_processed * 100):.1f}%" if docs_processed else "—"
 
-    # ---------------- KPI ROW ---------------- #
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Docs Processed", total_docs)
-    c2.metric("Manual Corrections", manual_reviews)
-    c3.metric("Approvals", approvals)
-    c4.metric("Review Rate", f"{review_rate}%")
-    c5.metric("System Mode", extraction_mode)
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Docs Processed", docs_processed)
+    k2.metric("Manual Corrections", corrections)
+    k3.metric("Approvals", approvals)
+    k4.metric("Review Rate", review_rate)
+    k5.metric("System Mode", extraction_mode)
 
     st.divider()
 
-    # ---------------- CONFIG PANEL ---------------- #
-    st.subheader("Configuration")
-    st.slider("Template Match Threshold", 0.0, 1.0, 0.55, 0.05, key="admin_match_threshold")
-    st.slider("Extraction Confidence Threshold", 0.5, 1.0, 0.80, 0.01, key="admin_confidence_threshold")
+    # ---------------- MODEL CONFIGURATION ---------------- #
+    st.subheader("Model Configuration")
+    st.info(f"Active extraction mode: **{extraction_mode}**. Change via the Pipeline settings sidebar.")
+    st.slider("Template Match Threshold", 0.0, 1.0, 0.55, 0.05, key="admin_match_threshold",
+              help="Minimum similarity score before a learned template is applied.")
+    st.slider("Extraction Confidence Threshold", 0.5, 1.0, 0.80, 0.01, key="admin_confidence_threshold",
+              help="Minimum field confidence required for auto-approval.")
     st.selectbox("Output Format", ["JSON", "CSV", "Both"], key="admin_output_format")
     st.checkbox("Auto-approve high confidence results", key="admin_auto_approve")
 
     st.divider()
 
-    # ---------------- SYSTEM HEALTH ---------------- #
-    st.subheader("System Health")
-    result = st.session_state.get("last_result")
-    if result:
-        passed = sum(1 for v in result.validation_results if v.get("status") == "pass")
-        failed = sum(1 for v in result.validation_results if v.get("status") == "fail")
-        warnings = sum(1 for v in result.validation_results if v.get("status") == "warn")
-        st.success(f"Passed: {passed}")
-        st.error(f"Failed: {failed}")
-        st.warning(f"Warnings: {warnings}")
-        st.bar_chart(
-            pd.DataFrame({"Status": ["Pass", "Fail", "Warn"], "Count": [passed, failed, warnings]}).set_index("Status")
+    # ---------------- OUTPUT / DB SETTINGS ---------------- #
+    st.subheader("Output Settings")
+    db_path = str(settings.database_path)
+    st.text_input("Database path (current)", value=db_path, disabled=True,
+                  help="To change, set the APP_DATA_DIR environment variable and restart.")
+    st.caption(f"Data directory: `{settings.data_dir}`")
+    db_file = Path(db_path)
+    if db_file.exists():
+        st.download_button(
+            "Download full database (.db)",
+            data=db_file.read_bytes(),
+            file_name="document_results.db",
+            mime="application/octet-stream",
+            use_container_width=True,
         )
-    else:
-        st.info("Process a document to see validation health metrics here.")
 
     st.divider()
 
-    # ---------------- PROCESSING TREND ---------------- #
-    st.subheader("Processing Trend")
-    if total_docs > 0:
-        st.line_chart({"Processed": [1] * total_docs})
+    # ---------------- FAILURES & ERRORS ---------------- #
+    st.subheader("Failures & Errors")
+    st.caption("Errors captured during document processing, pipeline failures, and infrastructure exceptions.")
+
+    errors = store.get_error_log(limit=200)
+    if not errors:
+        st.success("No errors recorded in the database.")
     else:
-        st.info("No documents processed yet this session.")
+        error_df = pd.DataFrame(errors)
+        tab_all, tab_doc, tab_infra = st.tabs(["All", "Document Processing", "Infrastructure / Code"])
+
+        with tab_all:
+            st.dataframe(error_df, use_container_width=True)
+            st.download_button(
+                "Export error log as CSV",
+                data=error_df.to_csv(index=False),
+                file_name="error_log.csv",
+                mime="text/csv",
+            )
+
+        with tab_doc:
+            doc_df = error_df[error_df["error_type"] == "document_processing"]
+            if doc_df.empty:
+                st.success("No document processing errors.")
+            else:
+                st.dataframe(doc_df, use_container_width=True)
+
+        with tab_infra:
+            infra_df = error_df[error_df["error_type"].isin(["infrastructure", "code"])]
+            if infra_df.empty:
+                st.success("No infrastructure or code errors.")
+            else:
+                st.dataframe(infra_df, use_container_width=True)
+
+    st.divider()
+
+    # ---------------- RAW UPLOAD LOG ---------------- #
+    st.subheader("Raw Input Log")
+    st.caption("All files uploaded and processed, with their saved paths and sizes.")
+    uploads = store.get_upload_log(limit=200)
+    if not uploads:
+        st.info("No uploads recorded yet.")
+    else:
+        upload_df = pd.DataFrame(uploads)
+        st.dataframe(upload_df, use_container_width=True)
+        st.download_button(
+            "Export upload log as CSV",
+            data=upload_df.to_csv(index=False),
+            file_name="upload_log.csv",
+            mime="text/csv",
+        )
 
 
 def render_schema_settings_tab(settings) -> None:
