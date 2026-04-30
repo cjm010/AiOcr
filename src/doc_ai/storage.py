@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,17 @@ class ResultStore:
 
     def _ensure_tables(self) -> None:
         conn = self._connect()
+        # Add processed_at to existing per-type tables when missing.
+        for type_table in TABLE_NAMES.values():
+            try:
+                cols = {row[1] for row in conn.execute(f"PRAGMA table_info({type_table})")}
+                if cols and "processed_at" not in cols:
+                    conn.execute(
+                        f"ALTER TABLE {type_table} ADD COLUMN processed_at TEXT"
+                    )
+            except sqlite3.OperationalError:
+                pass
+        conn.commit()
         try:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS pdf_uploads (
@@ -288,10 +300,18 @@ class ResultStore:
                     "source_file": source_file_name,
                     "original_filename": original_filename or source_file_name,
                     "content_hash": content_hash,
+                    "processed_at": datetime.utcnow().isoformat(sep=" ", timespec="seconds"),
                 }
                 for key in selected:
                     raw = extracted_data.get(key)
                     type_row[key] = json.dumps(raw) if isinstance(raw, (list, dict)) else raw
+                # If the per-type table predates processed_at, add the column on the fly.
+                try:
+                    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({type_table})")}
+                    if cols and "processed_at" not in cols:
+                        conn.execute(f"ALTER TABLE {type_table} ADD COLUMN processed_at TEXT")
+                except sqlite3.OperationalError:
+                    pass
                 pd.DataFrame([type_row]).to_sql(type_table, conn, if_exists="append", index=False)
         finally:
             conn.close()
