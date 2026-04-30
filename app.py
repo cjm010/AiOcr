@@ -1163,8 +1163,8 @@ def main() -> None:
     output_format = st.session_state.get("admin_output_format", "Both")
     auto_approve = st.session_state.get("admin_auto_approve", False)
 
-    tab_single, tab_bulk, tab_schema, tab_admin = st.tabs(
-        ["Single Document", "Bulk Upload", "Schema Settings", "Admin Dashboard"]
+    tab_single, tab_bulk, tab_schema, tab_admin, tab_metrics = st.tabs(
+        ["Single Document", "Bulk Upload", "Schema Settings", "Admin Dashboard", "Metrics Dashboard"]
     )
 
     with tab_single:
@@ -1183,6 +1183,10 @@ def main() -> None:
 
     with tab_admin:
         render_admin_dashboard_tab(extraction_mode, runtime_settings)
+
+    with tab_metrics:
+        from src.doc_ai.metrics_dashboard import render_metrics_dashboard
+        render_metrics_dashboard(runtime_settings)
 
 
 def render_admin_dashboard_tab(extraction_mode: str, settings) -> None:

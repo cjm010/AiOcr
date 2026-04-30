@@ -29,6 +29,7 @@ The platform now supports five document types across healthcare, legal, and busi
 - **Per-field confidence scores** — each extracted field shows a color-coded confidence badge (green ≥ 85%, orange ≥ 60%, red below that) in the review form
 - **Extraction completeness indicator** — progress bar showing filled vs. expected fields with contextual guidance (Good / Partial / Low)
 - **Admin dashboard** — live session KPIs (docs processed, corrections, approvals, review rate), configurable template match threshold, extraction confidence threshold, output format selector, and auto-approve toggle
+- **Metrics dashboard** — separate tab with all-time KPIs (total documents processed, passed by template, fell back to LLM, manually corrected, records created) plus a configurable daily LLM-usage line chart, all backed by the SQLite store
 - **Database schema settings** — per-type flat SQLite tables with field-level checkbox configuration; DDL preview before saving
 - Human review workflow with PDF preview and copyable parsed text
 - Output persistence to JSON, CSV, SQLite, and extraction trace logs
