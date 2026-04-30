@@ -20,35 +20,39 @@ class RateLimitRetry(Exception):
         self.retry_after = retry_after
 
 
-_MAX_RETRY_AFTER_SECONDS = 90
+_MAX_RETRY_AFTER_SECONDS = 60
 
 
 def _parse_retry_after(exc: Exception) -> int | None:
     """Extract the suggested wait time (seconds) from a rate-limit error, or None if not a 429.
 
-    Caps the returned value at _MAX_RETRY_AFTER_SECONDS: provider headers like
-    x-ratelimit-reset-requests can report the full minute-window reset time
-    (e.g. 552s), which is impractical for interactive use.  If the provider
-    still rejects after the cap we retry again — that is preferable to blocking
-    the UI for 9+ minutes.
+    Only the standard Retry-After header is used from response headers.
+    x-ratelimit-reset-requests / x-ratelimit-reset-tokens are intentionally
+    ignored: they report when the rate-limit *window* resets (often 500+s),
+    not how long the caller should wait before retrying.
+
+    All returned values are capped at _MAX_RETRY_AFTER_SECONDS.
     """
-    # openai-sdk attaches the raw httpx response
     response = getattr(exc, "response", None)
     if response is not None:
         headers = getattr(response, "headers", {})
-        for header in ("retry-after", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"):
-            val = headers.get(header)
-            if val:
-                try:
-                    return min(_MAX_RETRY_AFTER_SECONDS, max(1, int(float(val))))
-                except (ValueError, TypeError):
-                    pass
+        val = headers.get("retry-after")
+        if val:
+            try:
+                return min(_MAX_RETRY_AFTER_SECONDS, max(1, int(float(val))))
+            except (ValueError, TypeError):
+                pass
         status = getattr(response, "status_code", None)
         if status == 429:
             pass  # fall through to message parsing
 
     msg = str(exc)
-    # "Please try again in 1.5s" or "try again in 30s"
+    # Groq minute+second format: "try again in 9m44.879s" → total seconds
+    m = re.search(r"try again in (\d+)m(\d+(?:\.\d+)?)\s*s", msg, re.IGNORECASE)
+    if m:
+        total = int(m.group(1)) * 60 + int(float(m.group(2))) + 1
+        return min(_MAX_RETRY_AFTER_SECONDS, max(1, total))
+    # Plain seconds: "try again in 1.5s"
     m = re.search(r"try again in (\d+(?:\.\d+)?)\s*s", msg, re.IGNORECASE)
     if m:
         return min(_MAX_RETRY_AFTER_SECONDS, max(1, int(float(m.group(1))) + 1))
@@ -56,9 +60,9 @@ def _parse_retry_after(exc: Exception) -> int | None:
     m = re.search(r"retry.{0,15}?(\d+)\s*second", msg, re.IGNORECASE)
     if m:
         return min(_MAX_RETRY_AFTER_SECONDS, int(m.group(1)))
-    # Any mention of 429
+    # Any mention of 429 or rate limit
     if "429" in msg or "rate limit" in msg.lower() or "resource_exhausted" in msg.lower():
-        return 30
+        return 15
     return None
 
 
