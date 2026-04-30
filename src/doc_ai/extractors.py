@@ -20,8 +20,18 @@ class RateLimitRetry(Exception):
         self.retry_after = retry_after
 
 
+_MAX_RETRY_AFTER_SECONDS = 90
+
+
 def _parse_retry_after(exc: Exception) -> int | None:
-    """Extract the suggested wait time (seconds) from a rate-limit error, or None if not a 429."""
+    """Extract the suggested wait time (seconds) from a rate-limit error, or None if not a 429.
+
+    Caps the returned value at _MAX_RETRY_AFTER_SECONDS: provider headers like
+    x-ratelimit-reset-requests can report the full minute-window reset time
+    (e.g. 552s), which is impractical for interactive use.  If the provider
+    still rejects after the cap we retry again — that is preferable to blocking
+    the UI for 9+ minutes.
+    """
     # openai-sdk attaches the raw httpx response
     response = getattr(exc, "response", None)
     if response is not None:
@@ -30,7 +40,7 @@ def _parse_retry_after(exc: Exception) -> int | None:
             val = headers.get(header)
             if val:
                 try:
-                    return max(1, int(float(val)))
+                    return min(_MAX_RETRY_AFTER_SECONDS, max(1, int(float(val))))
                 except (ValueError, TypeError):
                     pass
         status = getattr(response, "status_code", None)
@@ -41,11 +51,11 @@ def _parse_retry_after(exc: Exception) -> int | None:
     # "Please try again in 1.5s" or "try again in 30s"
     m = re.search(r"try again in (\d+(?:\.\d+)?)\s*s", msg, re.IGNORECASE)
     if m:
-        return max(1, int(float(m.group(1))) + 1)
+        return min(_MAX_RETRY_AFTER_SECONDS, max(1, int(float(m.group(1))) + 1))
     # "retry after 30 seconds"
     m = re.search(r"retry.{0,15}?(\d+)\s*second", msg, re.IGNORECASE)
     if m:
-        return int(m.group(1))
+        return min(_MAX_RETRY_AFTER_SECONDS, int(m.group(1)))
     # Any mention of 429
     if "429" in msg or "rate limit" in msg.lower() or "resource_exhausted" in msg.lower():
         return 30

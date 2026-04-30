@@ -300,6 +300,27 @@ class TestRateLimitRetry:
         assert rl.retry_after == 45
         assert "too many requests" in str(rl)
 
+    def test_parse_retry_after_caps_large_header_value(self):
+        """Provider headers like x-ratelimit-reset-requests can return 500+s; cap at 90."""
+        from src.doc_ai.extractors import _MAX_RETRY_AFTER_SECONDS, _parse_retry_after
+
+        class FakeResponse:
+            status_code = 429
+            headers = {"x-ratelimit-reset-requests": "552"}
+
+        class FakeExc(Exception):
+            response = FakeResponse()
+
+        result = _parse_retry_after(FakeExc("rate limit"))
+        assert result == _MAX_RETRY_AFTER_SECONDS
+
+    def test_parse_retry_after_caps_large_message_value(self):
+        from src.doc_ai.extractors import _MAX_RETRY_AFTER_SECONDS, _parse_retry_after
+
+        exc = Exception("Please try again in 600s.")
+        result = _parse_retry_after(exc)
+        assert result == _MAX_RETRY_AFTER_SECONDS
+
 
 # ---------------------------------------------------------------------------
 # Document type detection
