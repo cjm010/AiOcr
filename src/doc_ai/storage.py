@@ -19,7 +19,34 @@ class ResultStore:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._schema_config = SchemaConfig(settings.data_dir / "schema_settings.json")
+        self._ensure_tables()
         self._migrate_schema()
+
+    def _ensure_tables(self) -> None:
+        conn = self._connect()
+        try:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS pdf_uploads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    original_filename TEXT NOT NULL,
+                    upload_path TEXT,
+                    file_size_bytes INTEGER,
+                    processed_at TEXT DEFAULT (datetime('now'))
+                );
+                CREATE TABLE IF NOT EXISTS error_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    error_type TEXT NOT NULL,
+                    source TEXT,
+                    severity TEXT DEFAULT 'error',
+                    message TEXT,
+                    logged_at TEXT DEFAULT (datetime('now'))
+                );
+            """)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._settings.database_path)
@@ -31,11 +58,113 @@ class ResultStore:
         if not Path(db).exists():
             return
         conn = self._connect()
+        # Get existing columns for document_results and add any that are missing.
         try:
-            conn.execute("ALTER TABLE document_results ADD COLUMN content_hash TEXT DEFAULT ''")
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(document_results)")}
+            new_columns = {
+                "content_hash": "TEXT DEFAULT ''",
+                "original_filename": "TEXT DEFAULT ''",
+                "currency": "TEXT",
+                "shipping_handling": "REAL",
+                "document_type": "TEXT",
+                "vendor_name": "TEXT",
+                "invoice_number": "TEXT",
+                "invoice_date": "TEXT",
+                "due_date": "TEXT",
+                "subtotal": "REAL",
+                "tax": "REAL",
+                "total_amount": "REAL",
+            }
+            for col, col_type in new_columns.items():
+                if col not in existing:
+                    try:
+                        conn.execute(f"ALTER TABLE document_results ADD COLUMN {col} {col_type}")
+                    except sqlite3.OperationalError:
+                        pass
             conn.commit()
         except sqlite3.OperationalError:
-            pass  # Column already exists or table not yet created — both are fine
+            pass  # Table not yet created — fine, will be created on first write
+        try:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS pdf_uploads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    original_filename TEXT NOT NULL,
+                    upload_path TEXT,
+                    file_size_bytes INTEGER,
+                    processed_at TEXT DEFAULT (datetime('now'))
+                );
+                CREATE TABLE IF NOT EXISTS error_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    error_type TEXT NOT NULL,
+                    source TEXT,
+                    severity TEXT DEFAULT 'error',
+                    message TEXT,
+                    logged_at TEXT DEFAULT (datetime('now'))
+                );
+            """)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+
+    def log_upload(self, original_filename: str, upload_path: str, file_size_bytes: int) -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO pdf_uploads (original_filename, upload_path, file_size_bytes) VALUES (?, ?, ?)",
+                (original_filename, upload_path, file_size_bytes),
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+
+    def log_error(self, error_type: str, source: str, message: str, severity: str = "error") -> None:
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO error_log (error_type, source, severity, message) VALUES (?, ?, ?, ?)",
+                (error_type, source, severity, message),
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+
+    def get_error_log(self, limit: int = 200) -> list[dict]:
+        if not Path(self._settings.database_path).exists():
+            return []
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "SELECT logged_at, severity, error_type, source, message "
+                "FROM error_log ORDER BY logged_at DESC LIMIT ?",
+                (limit,),
+            )
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            return []
+        finally:
+            conn.close()
+
+    def get_upload_log(self, limit: int = 200) -> list[dict]:
+        if not Path(self._settings.database_path).exists():
+            return []
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "SELECT processed_at, original_filename, upload_path, file_size_bytes "
+                "FROM pdf_uploads ORDER BY processed_at DESC LIMIT ?",
+                (limit,),
+            )
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            return []
         finally:
             conn.close()
 
