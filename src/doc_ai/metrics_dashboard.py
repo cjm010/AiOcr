@@ -77,12 +77,6 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return cur.fetchone() is not None
 
 
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    if not _table_exists(conn, table):
-        return False
-    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
-
-
 def _like_clause(column: str, keywords: Iterable[str]) -> str:
     """Return ``(LOWER(column) LIKE '%kw1%' OR ...)`` — keywords are static."""
     parts = [f"LOWER({column}) LIKE '%{kw}%'" for kw in keywords]
@@ -186,12 +180,9 @@ def llm_usage_daily(conn: sqlite3.Connection, days: int = 30) -> pd.DataFrame:
     union_parts: list[str] = [
         f"SELECT source_file, processed_at FROM {table}"
         for table in TABLE_NAMES.values()
-        if _has_column(conn, table, "processed_at")
+        if _table_exists(conn, table)
     ]
     if not union_parts:
-        # Older databases predate the per-type processed_at column. Without a
-        # timestamp source there is no time-series to compute — return an empty
-        # backfilled frame so the chart renders zeros instead of crashing.
         return _empty_daily_frame(days)
 
     union_sql = " UNION ALL ".join(union_parts)
@@ -314,21 +305,10 @@ def render_metrics_dashboard(settings) -> None:
         daily = llm_usage_daily(conn, days=int(window))
 
         if daily["llm_documents"].sum() == 0:
-            has_ts = any(
-                _has_column(conn, table, "processed_at")
-                for table in TABLE_NAMES.values()
+            st.info(
+                f"No LLM-assisted runs have been recorded in the last {window} days. "
+                "If you expect some, check that you ran with extraction mode `llm-assisted`."
             )
-            if not has_ts:
-                st.info(
-                    "Time-series data isn't available yet — your per-type tables "
-                    "predate the processed_at column. Process at least one new "
-                    "document and the chart will start populating from that point."
-                )
-            else:
-                st.info(
-                    f"No LLM-assisted runs have been recorded in the last {window} days. "
-                    "If you expect some, check that you ran with extraction mode `llm-assisted`."
-                )
         else:
             chart_df = daily.copy()
             chart_df["date"] = pd.to_datetime(chart_df["date"])

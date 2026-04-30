@@ -224,40 +224,6 @@ class TestScalarMetrics:
 # ---------------------------------------------------------------------------
 
 
-class TestProductionSchemaWithoutProcessedAt:
-    """Per-type tables predate processed_at — dashboard must not crash."""
-
-    def test_llm_usage_daily_returns_empty_frame_when_no_processed_at(self, tmp_path: Path) -> None:
-        db_path = tmp_path / "old_schema.db"
-        conn = sqlite3.connect(str(db_path))
-        try:
-            # Schema as pandas to_sql would create — no processed_at column.
-            conn.executescript(
-                """
-                CREATE TABLE document_results (source_file TEXT, document_type TEXT);
-                CREATE TABLE extraction_traces (source_file TEXT, step_number INTEGER, message TEXT);
-                CREATE TABLE invoices (source_file TEXT);
-                CREATE TABLE ndas (source_file TEXT);
-                """
-            )
-            conn.execute("INSERT INTO document_results VALUES ('a.pdf', 'invoice')")
-            conn.execute("INSERT INTO invoices VALUES ('a.pdf')")
-            conn.execute("INSERT INTO extraction_traces VALUES ('a.pdf', 1, 'fell back to LLM via openai')")
-            conn.commit()
-
-            # Should not raise — must gracefully degrade to a backfilled zero frame.
-            df = llm_usage_daily(conn, days=7)
-            assert len(df) == 7
-            assert df["llm_documents"].sum() == 0
-
-            # Scalar helpers should still report counts.
-            assert total_documents_processed(conn) == 1
-            assert llm_fallback_count(conn) == 1
-            assert records_created(conn) == 1
-        finally:
-            conn.close()
-
-
 class TestEmptyState:
     def test_get_metrics_on_missing_db(self, tmp_path: Path) -> None:
         m = get_metrics(tmp_path / "does_not_exist.db")
