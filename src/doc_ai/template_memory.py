@@ -45,12 +45,13 @@ class TemplateMemory:
         signature: dict[str, Any],
         extracted_data: dict[str, Any],
         lines: list[str],
+        spatial_anchors: list[dict] | None = None,
     ) -> dict[str, Any]:
         with _TEMPLATE_WRITE_LOCK:
             templates = self.load_templates()
             anchors = self._build_anchors(extracted_data, lines)
 
-            template = {
+            template: dict[str, Any] = {
                 "template_name": Path(source_file).stem,
                 "document_type": extracted_data.get("document_type", "invoice"),
                 "signature": signature,
@@ -61,10 +62,20 @@ class TemplateMemory:
                     if key not in {"source_file"} and value not in (None, "", [])
                 },
             }
+            if spatial_anchors:
+                template["spatial_anchors"] = spatial_anchors
 
             best_match = self.find_best_match(signature)
             if best_match and best_match.score >= 0.85:
                 template["template_name"] = best_match.template.get("template_name", template["template_name"])
+                # Merge spatial anchors: prefer newer, keep any existing fields not in the new set
+                existing = best_match.template.get("spatial_anchors", [])
+                if spatial_anchors:
+                    new_fields = {a["field"] for a in spatial_anchors}
+                    merged = [a for a in existing if a.get("field") not in new_fields] + spatial_anchors
+                    template["spatial_anchors"] = merged
+                elif existing:
+                    template["spatial_anchors"] = existing
                 templates = [
                     template if item.get("template_name") == template["template_name"] else item
                     for item in templates

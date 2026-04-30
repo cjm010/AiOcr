@@ -559,6 +559,20 @@ class AdaptiveInvoiceAgent(BaseExtractor):
         signature = TemplateMemory.build_signature(lines)
         trace.append("Generated document signature from top lines and keywords.")
 
+        # Spatial extraction from PDF (lazy — only if pdfplumber available)
+        spatial_fields: dict[str, Any] = {}
+        spatial_layouts = []
+        if parsed_document.file_path and parsed_document.file_path.suffix.lower() == ".pdf":
+            try:
+                from .spatial_extractor import extract_spatial_layout, extract_fields_from_layout
+                spatial_layouts = extract_spatial_layout(parsed_document.file_path)
+                if spatial_layouts:
+                    spatial_fields = extract_fields_from_layout(spatial_layouts)
+                    if spatial_fields:
+                        trace.append(f"Spatial PDF extraction found {len(spatial_fields)} field(s) by page position.")
+            except Exception:
+                pass
+
         template_match = self._template_memory.find_best_match(signature)
         if template_match:
             trace.append(
@@ -572,11 +586,28 @@ class AdaptiveInvoiceAgent(BaseExtractor):
         if template_match and template_match.score >= 0.55:
             extracted = _empty_schema(parsed_document.file_name, doc_type)
             extracted.update(_extract_from_template(template_match.template, parsed_document.raw_text))
+            # If the template has spatial anchors, use them to extract / confirm fields
+            if spatial_layouts and template_match.template.get("spatial_anchors"):
+                try:
+                    from .spatial_extractor import extract_by_spatial_anchors
+                    anchor_fields = extract_by_spatial_anchors(spatial_layouts, template_match.template["spatial_anchors"])
+                    if anchor_fields:
+                        extracted.update(anchor_fields)
+                        trace.append(f"Spatial template anchors matched {len(anchor_fields)} field(s) at expected page positions.")
+                except Exception:
+                    pass
             trace.append("Applied learned template anchors to extract fields.")
         else:
             extracted = self._rule_based.extract(parsed_document)
             trace.append("Fell back to rule-based label and regex extraction.")
         trace.append(f"Detected document type: {doc_type}.")
+
+        # Fill any remaining empty fields from spatial extraction
+        spatial_filled = [f for f, v in spatial_fields.items() if extracted.get(f) in (None, "", []) and v]
+        for f in spatial_filled:
+            extracted[f] = spatial_fields[f]
+        if spatial_filled:
+            trace.append(f"Filled {len(spatial_filled)} missing field(s) from spatial extraction: {', '.join(sorted(spatial_filled))}.")
 
         inferred = _infer_missing_fields(parsed_document.raw_text, extracted)
         if inferred:
@@ -608,6 +639,20 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
         signature = TemplateMemory.build_signature(lines)
         trace.append("Generated document signature from top lines and keywords.")
 
+        # Spatial extraction from PDF (lazy — only if pdfplumber available)
+        spatial_fields: dict[str, Any] = {}
+        spatial_layouts = []
+        if parsed_document.file_path and parsed_document.file_path.suffix.lower() == ".pdf":
+            try:
+                from .spatial_extractor import extract_spatial_layout, extract_fields_from_layout
+                spatial_layouts = extract_spatial_layout(parsed_document.file_path)
+                if spatial_layouts:
+                    spatial_fields = extract_fields_from_layout(spatial_layouts)
+                    if spatial_fields:
+                        trace.append(f"Spatial PDF extraction found {len(spatial_fields)} field(s) by page position.")
+            except Exception:
+                pass
+
         template_match = self._template_memory.find_best_match(signature)
         if template_match:
             trace.append(
@@ -624,7 +669,21 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
         if template_match and template_match.score >= 0.68:
             extracted = _empty_schema(parsed_document.file_name, doc_type)
             extracted.update(_extract_from_template(template_match.template, parsed_document.raw_text))
+            # Spatial anchor extraction for matched templates
+            if spatial_layouts and template_match.template.get("spatial_anchors"):
+                try:
+                    from .spatial_extractor import extract_by_spatial_anchors
+                    anchor_fields = extract_by_spatial_anchors(spatial_layouts, template_match.template["spatial_anchors"])
+                    if anchor_fields:
+                        extracted.update(anchor_fields)
+                        trace.append(f"Spatial template anchors matched {len(anchor_fields)} field(s) at expected page positions.")
+                except Exception:
+                    pass
             trace.append("Used learned template anchors because the document format looked familiar enough.")
+            # Fill gaps from general spatial extraction before deciding on LLM
+            for f, v in spatial_fields.items():
+                if extracted.get(f) in (None, "", []) and v:
+                    extracted[f] = v
             if _needs_llm_fallback(extracted):
                 trace.append("Template extraction was too incomplete, so the pipeline fell back to the LLM.")
                 if not self._settings.openai_api_key:
@@ -639,6 +698,10 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
 
             extracted = self._extract_with_llm(parsed_document, doc_type)
             trace.append("Used the LLM reasoning layer for an unseen or weakly matched document format.")
+            # Fill any gaps the LLM missed with spatial fields
+            for f, v in spatial_fields.items():
+                if extracted.get(f) in (None, "", []) and v:
+                    extracted[f] = v
 
         inferred = _infer_missing_fields(parsed_document.raw_text, extracted)
         if inferred:

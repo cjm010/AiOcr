@@ -1009,3 +1009,226 @@ class TestComputeFieldConfidence:
         conf = self._run(data, checks, trace)
         for field, score in conf.items():
             assert 0.0 <= score <= 1.0, f"{field}: {score}"
+
+
+# ---------------------------------------------------------------------------
+# Spatial extractor unit tests
+# ---------------------------------------------------------------------------
+
+class TestSpatialExtractor:
+    """Unit tests for spatial_extractor helpers — no pdfplumber required."""
+
+    def _make_word(self, text, x0, top, x1=None, bottom=None):
+        from src.doc_ai.spatial_extractor import SpatialWord
+        return SpatialWord(
+            text=text,
+            x0=float(x0),
+            top=float(top),
+            x1=float(x1 if x1 is not None else x0 + len(text) * 6),
+            bottom=float(bottom if bottom is not None else top + 12),
+        )
+
+    def _make_row(self, words):
+        from src.doc_ai.spatial_extractor import SpatialRow
+        return SpatialRow(words=words)
+
+    def test_group_into_rows_single_row(self):
+        from src.doc_ai.spatial_extractor import _group_into_rows
+        words = [
+            self._make_word("Invoice", 10, 50),
+            self._make_word("Number:", 60, 51),
+            self._make_word("INV-001", 120, 50),
+        ]
+        rows = _group_into_rows(words)
+        assert len(rows) == 1
+        assert rows[0].text == "Invoice Number: INV-001"
+
+    def test_group_into_rows_two_rows(self):
+        from src.doc_ai.spatial_extractor import _group_into_rows
+        words = [
+            self._make_word("Invoice:", 10, 50),
+            self._make_word("Total:", 10, 100),
+        ]
+        rows = _group_into_rows(words)
+        assert len(rows) == 2
+
+    def test_row_to_pair_inline_colon(self):
+        from src.doc_ai.spatial_extractor import SpatialWord, SpatialRow, _row_to_pair
+        words = [
+            self._make_word("Invoice", 10, 50),
+            self._make_word("Number:", 60, 50),
+            self._make_word("INV-001", 120, 50),
+        ]
+        row = SpatialRow(words=words)
+        pair = _row_to_pair(row)
+        assert pair is not None
+        label, value = pair
+        assert "invoice" in label
+        assert value == "INV-001"
+
+    def test_row_to_pair_no_colon_returns_none(self):
+        from src.doc_ai.spatial_extractor import SpatialRow, _row_to_pair
+        words = [self._make_word("just", 10, 50), self._make_word("text", 50, 50)]
+        row = SpatialRow(words=words)
+        assert _row_to_pair(row) is None
+
+    def test_extract_fields_from_layout_label_value(self):
+        from src.doc_ai.spatial_extractor import (
+            SpatialWord, SpatialRow, SpatialLayout, extract_fields_from_layout
+        )
+        words = [
+            self._make_word("Invoice", 10, 50, x1=60),
+            self._make_word("Number:", 62, 50, x1=110),
+            self._make_word("INV-999", 112, 50, x1=160),
+        ]
+        row = SpatialRow(words=words)
+        layout = SpatialLayout(page_width=600, page_height=800, rows=[row], page_number=0)
+        fields = extract_fields_from_layout([layout])
+        assert "invoice_number" in fields
+        assert fields["invoice_number"] == "INV-999"
+
+    def test_build_spatial_anchors_records_position(self):
+        from src.doc_ai.spatial_extractor import (
+            SpatialWord, SpatialRow, SpatialLayout, build_spatial_anchors
+        )
+        words = [
+            self._make_word("Invoice", 10, 50, x1=60),
+            self._make_word("Number:", 62, 50, x1=110),
+            self._make_word("INV-001", 112, 50, x1=162),
+        ]
+        row = SpatialRow(words=words)
+        layout = SpatialLayout(page_width=600, page_height=800, rows=[row], page_number=0)
+        extracted = {"invoice_number": "INV-001"}
+        anchors = build_spatial_anchors([layout], extracted)
+        assert len(anchors) == 1
+        assert anchors[0]["field"] == "invoice_number"
+        assert "norm_x" in anchors[0]
+        assert "norm_y" in anchors[0]
+        assert 0.0 <= anchors[0]["norm_x"] <= 1.0
+        assert 0.0 <= anchors[0]["norm_y"] <= 1.0
+
+    def test_extract_by_spatial_anchors_finds_value(self):
+        from src.doc_ai.spatial_extractor import (
+            SpatialWord, SpatialRow, SpatialLayout, extract_by_spatial_anchors
+        )
+        words = [
+            self._make_word("Invoice", 10, 50, x1=60),
+            self._make_word("Number:", 62, 50, x1=110),
+            self._make_word("INV-001", 112, 50, x1=162),
+        ]
+        row = SpatialRow(words=words)
+        layout = SpatialLayout(page_width=600, page_height=800, rows=[row], page_number=0)
+        anchors = [
+            {"field": "invoice_number", "label_text": "invoice number", "norm_x": 0.016, "norm_y": 0.0625},
+        ]
+        result = extract_by_spatial_anchors([layout], anchors, x_tol=0.15, y_tol=0.10)
+        assert "invoice_number" in result
+        assert result["invoice_number"] == "INV-001"
+
+    def test_empty_layouts_returns_empty(self):
+        from src.doc_ai.spatial_extractor import (
+            extract_fields_from_layout, build_spatial_anchors, extract_by_spatial_anchors
+        )
+        assert extract_fields_from_layout([]) == {}
+        assert build_spatial_anchors([], {"invoice_number": "X"}) == []
+        assert extract_by_spatial_anchors([], [{"field": "invoice_number"}]) == {}
+
+    def test_column_gap_pairs_detects_two_column_layout(self):
+        from src.doc_ai.spatial_extractor import SpatialWord, SpatialRow, _column_gap_pairs
+        # Label on left, value on right with >20pt gap
+        words = [
+            self._make_word("Total", 10, 50, x1=50),
+            self._make_word("1,234.56", 120, 50, x1=200),
+        ]
+        row = SpatialRow(words=words)
+        pairs = _column_gap_pairs([row])
+        assert "total" in pairs
+        assert pairs["total"] == "1,234.56"
+
+    def test_stacked_pairs_detects_label_then_value(self):
+        from src.doc_ai.spatial_extractor import SpatialWord, SpatialRow, _stacked_pairs
+        label_words = [self._make_word("Invoice Number:", 10, 50, x1=120)]
+        value_words = [self._make_word("INV-777", 10, 65, x1=80)]
+        label_row = SpatialRow(words=label_words)
+        value_row = SpatialRow(words=value_words)
+        pairs = _stacked_pairs([label_row, value_row])
+        assert "invoice number" in pairs
+        assert pairs["invoice number"] == "INV-777"
+
+
+class TestSpatialExtractionFromFixturePDF:
+    """Integration tests using a real fixture PDF — skipped if pdfplumber absent."""
+
+    FIXTURE = FIXTURES / "invoice_001.pdf"
+
+    def test_extract_spatial_layout_returns_data_for_pdf(self):
+        pytest.importorskip("pdfplumber")
+        if not self.FIXTURE.exists():
+            pytest.skip("invoice_001.pdf fixture not present")
+        from src.doc_ai.spatial_extractor import extract_spatial_layout
+        layouts = extract_spatial_layout(self.FIXTURE)
+        assert isinstance(layouts, list)
+        assert len(layouts) >= 1
+        assert layouts[0].page_width > 0
+        assert layouts[0].page_height > 0
+
+    def test_extract_fields_from_pdf_fixture_gets_some_fields(self):
+        pytest.importorskip("pdfplumber")
+        if not self.FIXTURE.exists():
+            pytest.skip("invoice_001.pdf fixture not present")
+        from src.doc_ai.spatial_extractor import extract_spatial_layout, extract_fields_from_layout
+        layouts = extract_spatial_layout(self.FIXTURE)
+        fields = extract_fields_from_layout(layouts)
+        # Searchable PDF should yield at least one recognised field
+        assert isinstance(fields, dict)
+        assert len(fields) >= 1
+
+
+class TestTemplateSpatialAnchors:
+    """Verify TemplateMemory stores and merges spatial anchors correctly."""
+
+    def test_learn_template_stores_spatial_anchors(self, tmp_path):
+        from src.doc_ai.template_memory import TemplateMemory
+        store = tmp_path / "templates.json"
+        mem = TemplateMemory(store)
+        anchors = [{"field": "invoice_number", "label_text": "invoice number", "norm_x": 0.05, "norm_y": 0.1}]
+        lines = ["Invoice Number: INV-001", "Total: 100.00"]
+        data = {"document_type": "invoice", "invoice_number": "INV-001", "total_amount": "100.00"}
+        sig = TemplateMemory.build_signature(lines)
+        template = mem.learn_template("test_inv.pdf", sig, data, lines, spatial_anchors=anchors)
+        assert "spatial_anchors" in template
+        assert template["spatial_anchors"][0]["field"] == "invoice_number"
+        stored = mem.load_templates()
+        assert stored[0].get("spatial_anchors") is not None
+
+    def test_learn_template_without_spatial_anchors_still_works(self, tmp_path):
+        from src.doc_ai.template_memory import TemplateMemory
+        store = tmp_path / "templates.json"
+        mem = TemplateMemory(store)
+        lines = ["Invoice Number: INV-002", "Total: 200.00"]
+        data = {"document_type": "invoice", "invoice_number": "INV-002"}
+        sig = TemplateMemory.build_signature(lines)
+        template = mem.learn_template("test_inv2.pdf", sig, data, lines, spatial_anchors=None)
+        assert template.get("template_name") == "test_inv2"
+        stored = mem.load_templates()
+        assert len(stored) == 1
+
+    def test_update_template_merges_spatial_anchors(self, tmp_path):
+        from src.doc_ai.template_memory import TemplateMemory
+        store = tmp_path / "templates.json"
+        mem = TemplateMemory(store)
+        lines = ["Invoice Number: INV-003", "Total: 300.00", "vendor acme corp"]
+        data = {"document_type": "invoice", "invoice_number": "INV-003", "total_amount": "300.00"}
+        sig = TemplateMemory.build_signature(lines)
+        anchors_first = [{"field": "invoice_number", "label_text": "invoice number", "norm_x": 0.05, "norm_y": 0.1}]
+        mem.learn_template("t.pdf", sig, data, lines, spatial_anchors=anchors_first)
+
+        # Second learn with same signature and a new anchor field
+        anchors_second = [{"field": "total_amount", "label_text": "total", "norm_x": 0.05, "norm_y": 0.8}]
+        mem.learn_template("t.pdf", sig, data, lines, spatial_anchors=anchors_second)
+
+        stored = mem.load_templates()
+        assert len(stored) == 1  # merged, not duplicated
+        fields_stored = {a["field"] for a in stored[0].get("spatial_anchors", [])}
+        assert "invoice_number" in fields_stored
+        assert "total_amount" in fields_stored

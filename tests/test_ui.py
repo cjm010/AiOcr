@@ -35,6 +35,9 @@ def _app(tmp_path) -> AppTest:
     """Return an AppTest wired to a throwaway data directory."""
     os.environ["APP_ENV"] = "test_ui"
     os.environ["APP_DATA_ROOT"] = str(tmp_path)
+    # Set to empty string so load_dotenv() (override=False by default) won't
+    # inject a real API key from .env — prevents real LLM calls during tests.
+    os.environ["OPENAI_API_KEY"] = ""
     from src.doc_ai.config import get_settings
     get_settings.cache_clear()
     return AppTest.from_file(APP_PATH, default_timeout=30)
@@ -625,10 +628,9 @@ class TestExtractionModes:
         assert not at.exception
 
     def test_llm_mode_without_api_key_shows_warning(self, tmp_path):
+        # _app() sets OPENAI_API_KEY="" so load_dotenv won't inject a real key
         at = _app(tmp_path)
         at.run()
-        # Clear any API key from environment
-        os.environ.pop("OPENAI_API_KEY", None)
         self._switch_mode(at, "llm-assisted")
         assert not at.exception
         # A warning about no API key should appear somewhere

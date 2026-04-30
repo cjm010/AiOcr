@@ -13,6 +13,22 @@ from .template_memory import TemplateMemory
 from .validators import get_validator
 
 
+def _actual_extraction_mode(requested: str, trace: list[str]) -> str:
+    """Infer the mode that was actually used from the extraction trace."""
+    combined = " ".join(trace).lower()
+    if "used the llm reasoning layer" in combined:
+        return "llm-assisted"
+    if (
+        "applied learned template anchors" in combined
+        or "used learned template anchors" in combined
+        or "matched learned template" in combined
+    ):
+        return "template"
+    if "fell back to rule-based" in combined or "rule-based label and regex" in combined:
+        return "rule-based"
+    return requested
+
+
 class DocumentPipeline:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -162,7 +178,7 @@ class DocumentPipeline:
             "source_file": saved_path.name,
             "original_filename": file_name,
             "content_hash": content_hash,
-            "extraction_mode": extraction_mode,
+            "extraction_mode": _actual_extraction_mode(extraction_mode, extraction_trace),
             "validation_passes": sum(check.status == "pass" for check in validation_checks),
             "validation_fails": sum(check.status == "fail" for check in validation_checks),
             "validation_warnings": sum(check.status == "warn" for check in validation_checks),
@@ -308,7 +324,21 @@ class DocumentPipeline:
 
         memory = TemplateMemory(self._settings.template_store_path)
         signature = TemplateMemory.build_signature(parsed_lines)
-        template = memory.learn_template(saved_path.name, signature, extracted_data, parsed_lines)
+
+        spatial_anchors: list[dict] = []
+        if saved_path.suffix.lower() == ".pdf":
+            try:
+                from .spatial_extractor import build_spatial_anchors, extract_spatial_layout
+                layouts = extract_spatial_layout(saved_path)
+                if layouts:
+                    spatial_anchors = build_spatial_anchors(layouts, extracted_data)
+            except Exception:
+                pass
+
+        template = memory.learn_template(
+            saved_path.name, signature, extracted_data, parsed_lines,
+            spatial_anchors=spatial_anchors or None,
+        )
         return template.get("template_name")
 
     @staticmethod
@@ -331,6 +361,8 @@ class DocumentPipeline:
             base_present = 0.88
         elif "learned template" in trace_lower or "applied" in trace_lower:
             base_present = 0.82
+        elif "spatial" in trace_lower:
+            base_present = 0.78
         elif "rule-based" in trace_lower or "regex" in trace_lower:
             base_present = 0.72
         else:

@@ -406,10 +406,22 @@ def compute_upload_signature(file_bytes: bytes) -> str:
 
 
 def _parse_template_match(trace: list[str]) -> tuple[str, str]:
+    # TemplateOnlyExtractor format: "Matched learned template `name` with score 0.95."
     for step in trace:
-        m = re.search(r"Matched learned template `([^`]+)` with score ([0-9.]+)", step)
+        m = re.search(r"Matched learned template `([^`]+)` with score ([0-9]+(?:\.[0-9]+)?)", step)
         if m:
             return m.group(1), f"{float(m.group(2)):.2f}"
+    # AdaptiveInvoiceAgent / LLMAssistedInvoiceAgent: candidate + applied confirmation
+    template_applied = any(
+        "applied learned template anchors" in s.lower() or
+        "used learned template anchors" in s.lower()
+        for s in trace
+    )
+    if template_applied:
+        for step in trace:
+            m = re.search(r"Best learned template candidate was `([^`]+)` with similarity ([0-9]+(?:\.[0-9]+)?)", step)
+            if m:
+                return m.group(1), f"{float(m.group(2)):.2f}"
     return "—", "—"
 
 
@@ -599,6 +611,7 @@ def render_single_tab(
         "Upload an invoice or similar unstructured business document",
         type=["pdf", "txt", "md", "json"],
         accept_multiple_files=False,
+        key=f"single_uploader_{st.session_state.get('single_upload_key', 0)}",
     )
 
     if not uploaded_file:
@@ -630,56 +643,67 @@ def render_single_tab(
             st.session_state.pop("last_result", None)
             st.session_state.pop("last_uploaded_name", None)
 
-    if st.button("Process document", type="primary"):
-        _rl_placeholder = st.empty()
-        result = None
-        for _attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
-            try:
-                with st.spinner("Running parsing, extraction, validation, and storage..."):
-                    result = pipeline.process_upload(
-                        uploaded_file,
-                        extraction_mode=extraction_mode,
-                        learn_from_upload=learn_from_upload,
-                    )
-                logger.info("SUCCESS file=%s hash=%s needs_review=%s", uploaded_file.name, result.content_hash, result.needs_review)
-                break
-            except RateLimitRetry as rl:
-                if _attempt < _MAX_RATE_LIMIT_RETRIES:
-                    logger.warning("RATE_LIMITED file=%s retry_after=%s attempt=%s", uploaded_file.name, rl.retry_after, _attempt + 1)
-                    _rate_limit_countdown(_rl_placeholder, rl.retry_after, n_files=1)
-                else:
-                    logger.error("RATE_LIMIT_EXHAUSTED file=%s", uploaded_file.name)
-                    st.error(f"Rate limit: exhausted {_MAX_RATE_LIMIT_RETRIES} retries. Try again later.")
-                    return
-            except Exception as exc:
-                logger.error("FAILED file=%s error=%s", uploaded_file.name, exc)
-                pipeline.log_error("infrastructure", uploaded_file.name, str(exc))
-                st.error(f"Pipeline failed unexpectedly: {exc}")
-                return
-        if result is None:
-            return
-        pipeline.log_upload(uploaded_file.name, result.upload_path, len(uploaded_bytes))
-        for err in result.errors:
-            pipeline.log_error("document_processing", uploaded_file.name, err, severity="warning")
-        st.session_state["last_result"] = result
-        st.session_state["last_uploaded_name"] = uploaded_file.name
-        st.session_state["last_processed_signature"] = current_upload_signature
-        st.session_state.docs_processed_total += 1
+    already_processed = st.session_state.get("last_processed_signature") == current_upload_signature
 
-        if auto_approve and _is_bulk_auto_approvable(result, confidence_threshold, apply_confidence_gate=True):
-            reviewed = pipeline.finalize_review(
-                source_file=result.source_file,
-                upload_path=result.upload_path,
-                parsed_text=result.parsed_text,
-                corrected_data=result.extracted_data,
-                extraction_mode=extraction_mode,
-                learn_from_upload=learn_from_upload,
-                approve_for_future_matching=True,
-                content_hash=result.content_hash,
-            )
-            st.session_state["last_result"] = reviewed
-            st.session_state.approvals_total += 1
+    if already_processed:
+        if st.button("Clear / upload another document", type="secondary", use_container_width=True):
+            st.session_state.single_upload_key = st.session_state.get("single_upload_key", 0) + 1
+            st.session_state.pop("last_result", None)
+            st.session_state.pop("last_uploaded_name", None)
+            st.session_state.pop("last_processed_signature", None)
+            st.session_state.pop("current_upload_signature", None)
             st.rerun()
+    else:
+        if st.button("Process document", type="primary"):
+            _rl_placeholder = st.empty()
+            result = None
+            for _attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+                try:
+                    with st.spinner("Running parsing, extraction, validation, and storage..."):
+                        result = pipeline.process_upload(
+                            uploaded_file,
+                            extraction_mode=extraction_mode,
+                            learn_from_upload=learn_from_upload,
+                        )
+                    logger.info("SUCCESS file=%s hash=%s needs_review=%s", uploaded_file.name, result.content_hash, result.needs_review)
+                    break
+                except RateLimitRetry as rl:
+                    if _attempt < _MAX_RATE_LIMIT_RETRIES:
+                        logger.warning("RATE_LIMITED file=%s retry_after=%s attempt=%s", uploaded_file.name, rl.retry_after, _attempt + 1)
+                        _rate_limit_countdown(_rl_placeholder, rl.retry_after, n_files=1)
+                    else:
+                        logger.error("RATE_LIMIT_EXHAUSTED file=%s", uploaded_file.name)
+                        st.error(f"Rate limit: exhausted {_MAX_RATE_LIMIT_RETRIES} retries. Try again later.")
+                        return
+                except Exception as exc:
+                    logger.error("FAILED file=%s error=%s", uploaded_file.name, exc)
+                    pipeline.log_error("infrastructure", uploaded_file.name, str(exc))
+                    st.error(f"Pipeline failed unexpectedly: {exc}")
+                    return
+            if result is None:
+                return
+            pipeline.log_upload(uploaded_file.name, result.upload_path, len(uploaded_bytes))
+            for err in result.errors:
+                pipeline.log_error("document_processing", uploaded_file.name, err, severity="warning")
+            st.session_state["last_result"] = result
+            st.session_state["last_uploaded_name"] = uploaded_file.name
+            st.session_state["last_processed_signature"] = current_upload_signature
+            st.session_state.docs_processed_total += 1
+
+            if auto_approve and _is_bulk_auto_approvable(result, confidence_threshold, apply_confidence_gate=True):
+                reviewed = pipeline.finalize_review(
+                    source_file=result.source_file,
+                    upload_path=result.upload_path,
+                    parsed_text=result.parsed_text,
+                    corrected_data=result.extracted_data,
+                    extraction_mode=extraction_mode,
+                    learn_from_upload=learn_from_upload,
+                    approve_for_future_matching=True,
+                    content_hash=result.content_hash,
+                )
+                st.session_state["last_result"] = reviewed
+                st.session_state.approvals_total += 1
+                st.rerun()
 
 
     result = st.session_state.get("last_result")
@@ -1041,6 +1065,8 @@ def main() -> None:
         st.session_state.manual_corrections_total = 0
     if "approvals_total" not in st.session_state:
         st.session_state.approvals_total = 0
+    if "single_upload_key" not in st.session_state:
+        st.session_state.single_upload_key = 0
 
     st.title("AI-Powered Data Quality Platform for Unstructured Data")
     st.caption(
@@ -1117,6 +1143,12 @@ def main() -> None:
                         "Start Ollama before processing documents.",
                         icon="⚠",
                     )
+            effective_api_key = st.session_state.get("ui_openai_api_key") or settings.openai_api_key
+            if not effective_api_key and provider != "ollama":
+                st.warning(
+                    "No API key configured. Extraction will fall back to adaptive-local.",
+                    icon="⚠",
+                )
             if st.button("Clear API key", use_container_width=True):
                 st.session_state["ui_openai_api_key"] = ""
                 st.rerun()

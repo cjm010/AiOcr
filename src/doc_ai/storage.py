@@ -254,6 +254,14 @@ class ResultStore:
     ) -> None:
         conn = self._connect()
         try:
+            # Delete any prior rows for this source_file so that finalize_review()
+            # replaces the initial process_bytes() write rather than duplicating it.
+            for tbl in ("document_results", "validation_results", "extraction_traces"):
+                try:
+                    conn.execute(f"DELETE FROM {tbl} WHERE source_file = ?", (source_file_name,))
+                except Exception:
+                    pass
+
             serialized = {
                 k: json.dumps(v) if isinstance(v, (list, dict)) else v
                 for k, v in extracted_data.items()
@@ -295,6 +303,10 @@ class ResultStore:
             doc_type = extracted_data.get("document_type", "invoice")
             type_table = TABLE_NAMES.get(doc_type)
             if type_table:
+                try:
+                    conn.execute(f"DELETE FROM {type_table} WHERE source_file = ?", (source_file_name,))
+                except Exception:
+                    pass
                 selected = self._schema_config.get_selected_fields(doc_type)
                 type_row: dict[str, Any] = {
                     "source_file": source_file_name,
