@@ -472,11 +472,11 @@ def _run_bulk_processing(
         result.summary["processing_time_s"] = round(time.monotonic() - t0, 2)
         return result
 
-    def _run_pass(items: list[dict]) -> list[dict]:
+    def _run_pass(items: list[dict], workers: int | None = None) -> list[dict]:
         """Process a list of items concurrently; return any that were rate-limited."""
         nonlocal completed
         rate_limited: list[dict] = []
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=workers or max_workers) as executor:
             future_to_item = {executor.submit(process_one, item): item for item in items}
             for future in as_completed(future_to_item):
                 item = future_to_item[future]
@@ -544,9 +544,12 @@ def _run_bulk_processing(
     for _attempt in range(_MAX_RATE_LIMIT_RETRIES):
         if not pending:
             break
-        max_wait = max(r["retry_after"] for r in pending)
-        _rate_limit_countdown(rate_limit_placeholder, max_wait, n_files=len(pending))
-        pending = _run_pass([r["item"] for r in pending])
+        # Use the median wait (not max) to avoid one outlier stalling everything,
+        # and retry with a single worker to avoid immediately re-triggering the limit.
+        sorted_waits = sorted(r["retry_after"] for r in pending)
+        median_wait = sorted_waits[len(sorted_waits) // 2]
+        _rate_limit_countdown(rate_limit_placeholder, median_wait, n_files=len(pending))
+        pending = _run_pass([r["item"] for r in pending], workers=1)
 
     # Any still rate-limited after all retries → mark as failed
     for r in pending:
