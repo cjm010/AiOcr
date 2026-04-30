@@ -285,7 +285,7 @@ class TestRateLimitRetry:
         from src.doc_ai.extractors import _parse_retry_after
 
         exc = Exception("Error code: 429 - rate limit exceeded")
-        assert _parse_retry_after(exc) == 30
+        assert _parse_retry_after(exc) == 15
 
     def test_parse_retry_after_returns_none_for_non_rate_limit(self):
         from src.doc_ai.extractors import _parse_retry_after
@@ -300,9 +300,9 @@ class TestRateLimitRetry:
         assert rl.retry_after == 45
         assert "too many requests" in str(rl)
 
-    def test_parse_retry_after_caps_large_header_value(self):
-        """Provider headers like x-ratelimit-reset-requests can return 500+s; cap at 90."""
-        from src.doc_ai.extractors import _MAX_RETRY_AFTER_SECONDS, _parse_retry_after
+    def test_parse_retry_after_ignores_reset_window_headers(self):
+        """x-ratelimit-reset-requests reports window reset time, not retry delay — must be ignored."""
+        from src.doc_ai.extractors import _parse_retry_after
 
         class FakeResponse:
             status_code = 429
@@ -311,15 +311,41 @@ class TestRateLimitRetry:
         class FakeExc(Exception):
             response = FakeResponse()
 
-        result = _parse_retry_after(FakeExc("rate limit"))
-        assert result == _MAX_RETRY_AFTER_SECONDS
+        # Falls through to message parsing and hits the generic 429 fallback (15s)
+        result = _parse_retry_after(FakeExc("rate limit exceeded"))
+        assert result == 15
+
+    def test_parse_retry_after_uses_retry_after_header(self):
+        from src.doc_ai.extractors import _parse_retry_after
+
+        class FakeResponse:
+            status_code = 429
+            headers = {"retry-after": "20"}
+
+        class FakeExc(Exception):
+            response = FakeResponse()
+
+        assert _parse_retry_after(FakeExc("429")) == 20
 
     def test_parse_retry_after_caps_large_message_value(self):
         from src.doc_ai.extractors import _MAX_RETRY_AFTER_SECONDS, _parse_retry_after
 
         exc = Exception("Please try again in 600s.")
-        result = _parse_retry_after(exc)
-        assert result == _MAX_RETRY_AFTER_SECONDS
+        assert _parse_retry_after(exc) == _MAX_RETRY_AFTER_SECONDS
+
+    def test_parse_retry_after_handles_minute_format(self):
+        """Groq reports 'try again in 9m44.879s' for longer-period limits."""
+        from src.doc_ai.extractors import _MAX_RETRY_AFTER_SECONDS, _parse_retry_after
+
+        exc = Exception("Rate limit reached. Please try again in 9m44.879s.")
+        # 9*60 + 44 + 1 = 585s → capped
+        assert _parse_retry_after(exc) == _MAX_RETRY_AFTER_SECONDS
+
+    def test_parse_retry_after_handles_short_minute_format(self):
+        from src.doc_ai.extractors import _parse_retry_after
+
+        exc = Exception("Rate limit reached. Please try again in 0m15.5s.")
+        assert _parse_retry_after(exc) == 16  # 0*60 + 15 + 1
 
 
 # ---------------------------------------------------------------------------
