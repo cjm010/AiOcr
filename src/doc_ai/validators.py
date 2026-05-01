@@ -67,12 +67,38 @@ class InvoiceValidator(BaseValidator):
             checks.append(ValidationCheck(field="total_amount", status="fail", message="Total amount must be > 0."))
 
         subtotal = extracted_data.get("subtotal")
+        if isinstance(subtotal, (int, float)):
+            checks.append(ValidationCheck(field="subtotal", status="pass", message="Subtotal is present."))
+        else:
+            checks.append(ValidationCheck(field="subtotal", status="warn", message="Subtotal not found."))
+
         tax = extracted_data.get("tax")
-        shipping = extracted_data.get("shipping_handling") or 0
+        if isinstance(tax, (int, float)):
+            checks.append(ValidationCheck(field="tax", status="pass", message="Tax amount is present."))
+        else:
+            checks.append(ValidationCheck(field="tax", status="warn", message="Tax amount not found."))
+
+        shipping = extracted_data.get("shipping_handling")
+        if isinstance(shipping, (int, float)):
+            checks.append(ValidationCheck(field="shipping_handling", status="pass", message="Shipping/handling is present."))
+
+        currency = extracted_data.get("currency")
+        if currency and str(currency).strip():
+            checks.append(ValidationCheck(field="currency", status="pass", message=f"Currency: {currency}."))
+        else:
+            checks.append(ValidationCheck(field="currency", status="warn", message="Currency not identified."))
+
+        line_items = extracted_data.get("line_items")
+        if isinstance(line_items, list) and line_items:
+            checks.append(ValidationCheck(field="line_items", status="pass", message=f"{len(line_items)} line item(s) found."))
+        else:
+            checks.append(ValidationCheck(field="line_items", status="warn", message="No line items extracted."))
+
+        shipping_for_total = float(shipping) if isinstance(shipping, (int, float)) else 0.0
         if isinstance(total, (int, float)) and isinstance(subtotal, (int, float)) and isinstance(tax, (int, float)):
-            expected_total = round(subtotal + tax + float(shipping), 2)
+            expected_total = round(subtotal + tax + shipping_for_total, 2)
             actual_total = round(total, 2)
-            label = "Subtotal + tax + shipping" if shipping else "Subtotal + tax"
+            label = "Subtotal + tax + shipping" if shipping_for_total else "Subtotal + tax"
             if expected_total == actual_total:
                 checks.append(
                     ValidationCheck(field="total_consistency", status="pass", message=f"{label} matches total.")

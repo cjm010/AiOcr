@@ -48,13 +48,17 @@ from .schema_config import TABLE_NAMES
 
 # Mirrors the keyword set in DocumentPipeline._compute_field_confidence so a
 # document that scored as "LLM-baselined" is also counted as LLM here.
+# These phrases appear only when an LLM was actually invoked for extraction.
+# Deliberately excludes "llm-assisted" (the mode name) and "LLM fallback" (intent,
+# not invocation) so that documents where the LLM was configured but not called
+# are not counted.
 _LLM_KEYWORDS: tuple[str, ...] = (
-    "llm",
-    "openai",
-    "groq",
-    "openrouter",
-    "ollama",
-    "gemini",
+    "llm reasoning layer",
+    "used openai",
+    "used groq",
+    "used openrouter",
+    "used ollama",
+    "used gemini",
 )
 
 _TEMPLATE_HIT_VERBS: tuple[str, ...] = ("matched", "applied", "used")

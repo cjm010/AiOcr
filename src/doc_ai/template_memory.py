@@ -4,11 +4,27 @@ import json
 import re
 import threading
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
 _TEMPLATE_WRITE_LOCK = threading.Lock()
+_BAD_PATTERN_WRITE_LOCK = threading.Lock()
+_MAX_TEMPLATES_PER_TYPE = 20
+_SKIP_BAD_PATTERN_FIELDS = {"document_type", "source_file"}
+
+
+def _derive_bad_pattern(value: str) -> str:
+    """Derive a generalizable regex from a rejected field value.
+
+    Values consisting of a single repeated character (e.g. "___", "---") are
+    generalised to match any length of that character.  Everything else becomes
+    a case-insensitive exact match so we don't accidentally reject valid values.
+    """
+    stripped = value.strip()
+    if stripped and len(set(stripped)) == 1:
+        char = re.escape(stripped[0])
+        return rf"^\s*{char}+\s*$"
+    return rf"^\s*{re.escape(stripped)}\s*$"
 
 
 @dataclass
@@ -30,11 +46,16 @@ class TemplateMemory:
         except json.JSONDecodeError:
             return []
 
-    def find_best_match(self, signature: dict[str, Any]) -> TemplateMatch | None:
+    def find_best_match(
+        self,
+        signature: dict[str, Any],
+        document_type: str | None = None,
+    ) -> TemplateMatch | None:
         best_match: TemplateMatch | None = None
         for template in self.load_templates():
-            template_signature = template.get("signature", {})
-            score = self._score_signature(signature, template_signature)
+            if document_type and template.get("document_type") != document_type:
+                continue
+            score = self._score_signature(signature, template.get("signature", {}))
             if best_match is None or score > best_match.score:
                 best_match = TemplateMatch(template=template, score=score)
         return best_match
@@ -56,19 +77,14 @@ class TemplateMemory:
                 "document_type": extracted_data.get("document_type", "invoice"),
                 "signature": signature,
                 "anchors": anchors,
-                "example_fields": {
-                    key: value
-                    for key, value in extracted_data.items()
-                    if key not in {"source_file"} and value not in (None, "", [])
-                },
             }
             if spatial_anchors:
                 template["spatial_anchors"] = spatial_anchors
 
-            best_match = self.find_best_match(signature)
+            doc_type = extracted_data.get("document_type")
+            best_match = self.find_best_match(signature, document_type=doc_type)
             if best_match and best_match.score >= 0.85:
                 template["template_name"] = best_match.template.get("template_name", template["template_name"])
-                # Merge spatial anchors: prefer newer, keep any existing fields not in the new set
                 existing = best_match.template.get("spatial_anchors", [])
                 if spatial_anchors:
                     new_fields = {a["field"] for a in spatial_anchors}
@@ -81,58 +97,65 @@ class TemplateMemory:
                     for item in templates
                 ]
             else:
-                templates.append(template)
+                # Enforce per-type cap before adding a new template.
+                type_templates = [t for t in templates if t.get("document_type") == doc_type]
+                if len(type_templates) >= _MAX_TEMPLATES_PER_TYPE:
+                    # Replace the existing template most similar to the new one.
+                    most_similar = max(
+                        type_templates,
+                        key=lambda t: self._score_signature(signature, t.get("signature", {})),
+                    )
+                    templates = [
+                        template if t.get("template_name") == most_similar.get("template_name") else t
+                        for t in templates
+                    ]
+                else:
+                    templates.append(template)
 
             self._store_path.write_text(json.dumps(templates, indent=2), encoding="utf-8")
             return template
 
     def _build_anchors(self, extracted_data: dict[str, Any], lines: list[str]) -> dict[str, dict[str, str]]:
         anchors: dict[str, dict[str, str]] = {}
+        used_patterns: set[str] = set()
         for field, value in extracted_data.items():
             if field in {"document_type", "source_file"} or value in (None, "", []):
                 continue
-
             value_text = str(value).strip()
             for line in lines:
                 line_text = line.strip()
                 if not line_text or value_text.lower() not in line_text.lower():
                     continue
                 label = self._extract_label(line_text)
-                if label:
-                    anchors[field] = {
-                        "label": label,
-                        "pattern": rf"{re.escape(label)}\s*:\s*(?P<value>.+)",
-                    }
-                else:
-                    anchors[field] = {"label": "", "pattern": re.escape(value_text)}
+                if not label:
+                    continue
+                pattern = rf"{re.escape(label)}\s*:\s*(?P<value>.+)"
+                if pattern in used_patterns:
+                    continue
+                # Verify the pattern captures exactly the expected value on this line.
+                # If it captures much more (e.g. the value is buried in a longer string),
+                # the anchor would extract wrong data on future documents.
+                m = re.search(pattern, line_text, re.IGNORECASE)
+                if not m:
+                    continue
+                captured = m.group("value").strip()
+                if captured.lower() != value_text.lower():
+                    continue
+                used_patterns.add(pattern)
+                anchors[field] = {"label": label, "pattern": pattern}
                 break
         return anchors
 
     @staticmethod
-    def build_signature(lines: list[str]) -> dict[str, Any]:
-        top_lines = [TemplateMemory._normalize(line) for line in lines[:12]]
-        joined = " ".join(lines[:30]).lower()
-        keywords = sorted(
-            {
-                keyword
-                for keyword in (
-                    "invoice",
-                    "vendor",
-                    "supplier",
-                    "bill to",
-                    "ship to",
-                    "total",
-                    "amount due",
-                    "tax",
-                    "due date",
-                    "invoice date",
-                    "subtotal",
-                )
-                if keyword in joined
-            }
-        )
-        layout_hints = [TemplateMemory._line_shape(line) for line in lines[:12]]
-        return {"top_lines": top_lines, "keywords": keywords, "layout_hints": layout_hints}
+    def build_signature(lines: list[str], layouts: list | None = None) -> dict[str, Any]:
+        zone_density: list[float] = []
+        if layouts:
+            try:
+                from .spatial_extractor import build_zone_density
+                zone_density = build_zone_density(layouts)
+            except Exception:
+                pass
+        return {"zone_density": zone_density}
 
     @staticmethod
     def _extract_label(line: str) -> str:
@@ -141,29 +164,73 @@ class TemplateMemory:
         return ""
 
     @staticmethod
-    def _normalize(text: str) -> str:
-        text = re.sub(r"\d", "#", text.lower())
-        return re.sub(r"\s+", " ", text).strip()
-
-    @staticmethod
-    def _line_shape(text: str) -> str:
-        text = re.sub(r"[A-Z]", "A", text)
-        text = re.sub(r"[a-z]", "a", text)
-        text = re.sub(r"\d", "#", text)
-        return re.sub(r"\s+", " ", text.strip())[:120]
-
-    @staticmethod
     def _score_signature(left: dict[str, Any], right: dict[str, Any]) -> float:
-        left_text = " | ".join(left.get("top_lines", []))
-        right_text = " | ".join(right.get("top_lines", []))
-        text_score = SequenceMatcher(None, left_text, right_text).ratio()
-        left_shape = " | ".join(left.get("layout_hints", []))
-        right_shape = " | ".join(right.get("layout_hints", []))
-        shape_score = SequenceMatcher(None, left_shape, right_shape).ratio()
-        left_keywords = set(left.get("keywords", []))
-        right_keywords = set(right.get("keywords", []))
-        if not left_keywords and not right_keywords:
-            keyword_score = 1.0
-        else:
-            keyword_score = len(left_keywords & right_keywords) / max(len(left_keywords | right_keywords), 1)
-        return round((text_score * 0.5) + (shape_score * 0.25) + (keyword_score * 0.25), 4)
+        ld = left.get("zone_density", [])
+        rd = right.get("zone_density", [])
+        if ld and rd:
+            from .spatial_extractor import cosine_similarity
+            return cosine_similarity(ld, rd)
+        return 0.0
+
+
+class BadPatternStore:
+    """Persists per-field bad-value patterns learned from human corrections.
+
+    Patterns are scoped to ``{doc_type}.{field}`` so they don't bleed across
+    document types.  A value cleared by a reviewer during ``finalize_review``
+    is generalised into a regex and stored here; future extractions that
+    produce a matching value have that field silently nulled before validation.
+    """
+
+    def __init__(self, store_path: Path) -> None:
+        self._path = store_path
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        if not self._path.exists():
+            self._path.write_text("{}", encoding="utf-8")
+
+    def load(self) -> dict[str, list[str]]:
+        try:
+            return json.loads(self._path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def add_pattern(self, doc_type: str, field: str, rejected_value: str) -> str | None:
+        """Derive and store a bad-value pattern. Returns the pattern, or None if skipped."""
+        if not rejected_value or not str(rejected_value).strip():
+            return None
+        pattern = _derive_bad_pattern(str(rejected_value))
+        key = f"{doc_type}.{field}"
+        with _BAD_PATTERN_WRITE_LOCK:
+            patterns = self.load()
+            existing = patterns.get(key, [])
+            if pattern not in existing:
+                existing.append(pattern)
+                patterns[key] = existing
+                self._path.write_text(json.dumps(patterns, indent=2), encoding="utf-8")
+        return pattern
+
+    def apply(self, extracted: dict[str, Any]) -> list[str]:
+        """Null out extracted values that match stored bad patterns.
+
+        Returns the list of field names that were cleared.
+        """
+        doc_type = extracted.get("document_type", "invoice")
+        patterns = self.load()
+        cleared: list[str] = []
+        for field, value in list(extracted.items()):
+            if field in _SKIP_BAD_PATTERN_FIELDS or value in (None, "", []):
+                continue
+            key = f"{doc_type}.{field}"
+            field_patterns = patterns.get(key, [])
+            if not field_patterns:
+                continue
+            value_str = str(value).strip()
+            for pat in field_patterns:
+                try:
+                    if re.search(pat, value_str, re.IGNORECASE):
+                        extracted[field] = None
+                        cleared.append(field)
+                        break
+                except re.error:
+                    pass
+        return cleared
