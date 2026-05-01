@@ -197,6 +197,22 @@ class TestSidebar:
         cancel_btn.click().run()
         assert not at.exception
 
+    def test_reset_clears_output_files(self, tmp_path):
+        # Regression: reset must also delete output files, not just the DB and template store.
+        at = _app(tmp_path)
+        # APP_ENV is "test_ui", so the data dir is tmp_path/test_ui/outputs
+        output_dir = tmp_path / "test_ui" / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stale = output_dir / "stale_result.json"
+        stale.write_text('{"source_file": "old.pdf"}', encoding="utf-8")
+
+        at.run()
+        next(b for b in at.sidebar.button if b.label.lower() == "reset all data").click().run()
+        yes_btn = next(b for b in at.sidebar.button if "yes" in b.label.lower())
+        yes_btn.click().run()
+        assert not at.exception
+        assert not stale.exists()
+
     def test_api_key_input_present(self, tmp_path):
         at = _app(tmp_path)
         at.run()
@@ -742,8 +758,8 @@ class TestReviewFormConfidenceBadges:
             f"No 'confidence' badge found in form labels. Labels: {all_labels}"
         )
 
-    def test_review_form_shows_green_confidence_for_good_field(self, tmp_path):
-        """A field with a passing validation should render a green badge."""
+    def test_review_form_shows_source_badge_for_extracted_field(self, tmp_path):
+        """Extracted fields should carry a source-method badge in their label."""
         pdf = _pdf("invoice_001.pdf")
         if not pdf.exists():
             pytest.skip("invoice_001.pdf not in fixtures")
@@ -758,8 +774,9 @@ class TestReviewFormConfidenceBadges:
         btn.click().run()
         assert not at.exception
         all_labels = " ".join(t.label for t in at.text_input)
-        # green[] badge must appear for at least one field
-        assert ":green[" in all_labels
+        # A source-method badge (Rule-based in CI, green for Cross-validated/Manual in prod)
+        # must appear for at least one extracted field.
+        assert any(badge in all_labels for badge in (":gray[Rule-based]", ":green[", ":violet[LLM]"))
 
     def test_review_form_shows_red_for_missing_field(self, tmp_path):
         """A field that could not be extracted should get a red 'not extracted' badge."""

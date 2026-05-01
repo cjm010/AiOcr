@@ -17,6 +17,7 @@ class Settings:
     database_path: Path
     template_store_path: Path
     promoted_template_store_path: Path
+    bad_patterns_path: Path
     review_export_dir: Path
     enable_template_learning: bool
     min_learning_pass_ratio: float
@@ -48,6 +49,7 @@ def get_settings() -> Settings:
         database_path=data_dir / "document_results.db",
         template_store_path=data_dir / "learned_templates.json",
         promoted_template_store_path=data_dir / "promoted_templates.json",
+        bad_patterns_path=data_dir / "bad_patterns.json",
         review_export_dir=review_export_dir,
         enable_template_learning=os.getenv("ENABLE_TEMPLATE_LEARNING", "true").lower() == "true",
         min_learning_pass_ratio=float(os.getenv("MIN_LEARNING_PASS_RATIO", "0.6")),

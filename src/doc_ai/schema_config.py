@@ -166,6 +166,11 @@ class SchemaConfig:
         return f"CREATE TABLE IF NOT EXISTS {table} (\n" + ",\n".join(col_defs) + "\n);"
 
 
+def get_required_fields(doc_type: str) -> frozenset[str]:
+    """Return the set of required field keys for a document type per FIELD_CATALOG."""
+    return frozenset(f["key"] for f in FIELD_CATALOG.get(doc_type, []) if f["required"])
+
+
 def _catalog_order(doc_type: str, key: str) -> int:
     for i, f in enumerate(FIELD_CATALOG.get(doc_type, [])):
         if f["key"] == key:

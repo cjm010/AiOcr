@@ -74,6 +74,7 @@ class ResultStore:
         try:
             existing = {row[1] for row in conn.execute("PRAGMA table_info(document_results)")}
             new_columns = {
+                # Core / invoice
                 "content_hash": "TEXT DEFAULT ''",
                 "original_filename": "TEXT DEFAULT ''",
                 "currency": "TEXT",
@@ -86,6 +87,38 @@ class ResultStore:
                 "subtotal": "REAL",
                 "tax": "REAL",
                 "total_amount": "REAL",
+                # Business doc
+                "company_name": "TEXT",
+                "document_subtype": "TEXT",
+                "report_period": "TEXT",
+                "report_date": "TEXT",
+                "report_id": "TEXT",
+                "prepared_by": "TEXT",
+                "approved_by": "TEXT",
+                "classification": "TEXT",
+                "executive_summary": "TEXT",
+                # Medical discharge
+                "facility_name": "TEXT",
+                "patient_name": "TEXT",
+                "admission_date": "TEXT",
+                "discharge_date": "TEXT",
+                "primary_diagnosis": "TEXT",
+                "attending_physician": "TEXT",
+                # NDA
+                "disclosing_party": "TEXT",
+                "receiving_party": "TEXT",
+                "agreement_date": "TEXT",
+                "effective_date": "TEXT",
+                "expiration_date": "TEXT",
+                "agreement_type": "TEXT",
+                "governing_law": "TEXT",
+                # Lab report
+                "lab_name": "TEXT",
+                "patient_id": "TEXT",
+                "collected_date": "TEXT",
+                "reported_date": "TEXT",
+                "ordering_physician": "TEXT",
+                "clinical_interpretation": "TEXT",
             }
             for col, col_type in new_columns.items():
                 if col not in existing:
@@ -143,6 +176,22 @@ class ResultStore:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+        finally:
+            conn.close()
+
+    def get_processing_trace(self, source_file: str) -> list[str]:
+        """Return the stored trace steps for *source_file*, ordered by step_number."""
+        if not Path(self._settings.database_path).exists():
+            return []
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "SELECT message FROM extraction_traces WHERE source_file = ? ORDER BY step_number",
+                (source_file,),
+            )
+            return [row[0] for row in cursor.fetchall()]
+        except sqlite3.OperationalError:
+            return []
         finally:
             conn.close()
 
@@ -295,6 +344,16 @@ class ResultStore:
                     for index, message in enumerate(extraction_trace)
                 ]
             )
+            existing_col_rows = conn.execute("PRAGMA table_info(document_results)").fetchall()
+            if existing_col_rows:  # table exists — add any new columns before appending
+                existing_cols = {row[1] for row in existing_col_rows}
+                altered = False
+                for col in doc_df.columns:
+                    if col not in existing_cols:
+                        conn.execute(f"ALTER TABLE document_results ADD COLUMN [{col}] TEXT")
+                        altered = True
+                if altered:
+                    conn.commit()  # schema changes must be committed before to_sql sees them
             doc_df.to_sql("document_results", conn, if_exists="append", index=False)
             validation_df.to_sql("validation_results", conn, if_exists="append", index=False)
             trace_df.to_sql("extraction_traces", conn, if_exists="append", index=False)

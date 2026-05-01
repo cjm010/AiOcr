@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .extractors import ExtractionError, build_extractor
+from .extractors import ExtractionError, RateLimitRetry, build_extractor
 from .parsers import DocumentParser
 from .schemas import PipelineResult
 from .storage import ResultStore
-from .template_memory import TemplateMemory
+from .template_memory import BadPatternStore, TemplateMemory
 from .validators import get_validator
 
 
@@ -27,6 +28,17 @@ def _actual_extraction_mode(requested: str, trace: list[str]) -> str:
     if "fell back to rule-based" in combined or "rule-based label and regex" in combined:
         return "rule-based"
     return requested
+
+
+# Compiled once — used by DocumentPipeline._build_field_sources on every document.
+_GAP_RE = re.compile(r"^(.+?)\s+filled\s+\d+\s+\S+.*?:\s*(.+)\.$", re.IGNORECASE)
+_INFER_RE = re.compile(
+    r"inferred additional fields from semantic heuristics:\s*(.+)\.$", re.IGNORECASE
+)
+_BAD_RE = re.compile(
+    r"learned bad-value patterns for \d+ field\S*\s+from corrections:\s*(.+)\.$",
+    re.IGNORECASE,
+)
 
 
 class DocumentPipeline:
@@ -135,6 +147,33 @@ class DocumentPipeline:
                 "currency": "USD",
             }
             extraction_trace.append(f"Extraction failed: {exc}")
+        except RateLimitRetry:
+            raise  # propagate to app.py rate-limit handler
+        except Exception as exc:
+            # Unexpected API/runtime errors (e.g. Groq "Execution failed") — degrade
+            # gracefully so the document gets flagged for review rather than crashing.
+            errors.append(f"Extraction error: {exc}")
+            extracted_data = {
+                "document_type": "invoice",
+                "source_file": saved_path.name,
+                "vendor_name": None,
+                "invoice_number": None,
+                "invoice_date": None,
+                "due_date": None,
+                "subtotal": None,
+                "tax": None,
+                "total_amount": None,
+                "currency": "USD",
+            }
+            extraction_trace.append(f"Extraction failed unexpectedly: {exc}")
+
+        bad_store = BadPatternStore(self._settings.bad_patterns_path)
+        cleared_fields = bad_store.apply(extracted_data)
+        if cleared_fields:
+            extraction_trace.append(
+                f"Cleared {len(cleared_fields)} field(s) matching known bad patterns: "
+                f"{', '.join(sorted(cleared_fields))}."
+            )
 
         validation_checks = get_validator(extracted_data.get("document_type", "invoice")).validate(extracted_data)
         learned_template_name = self._learn_from_result(
@@ -188,8 +227,9 @@ class DocumentPipeline:
             "needs_review": needs_review,
         }
 
+        field_sources = self._build_field_sources(extracted_data, extraction_trace)
         field_confidence = self._compute_field_confidence(
-            extracted_data, validation_checks, extraction_trace
+            extracted_data, validation_checks, extraction_trace, field_sources
         )
 
         return PipelineResult(
@@ -205,6 +245,7 @@ class DocumentPipeline:
             content_hash=content_hash,
             needs_review=needs_review,
             field_confidence=field_confidence,
+            field_sources=field_sources,
         )
 
     def is_already_processed(self, content_hash: str) -> bool:
@@ -220,11 +261,33 @@ class DocumentPipeline:
         learn_from_upload: bool = True,
         approve_for_future_matching: bool = False,
         content_hash: str = "",
+        original_extracted: dict[str, Any] | None = None,
     ) -> PipelineResult:
         saved_path = Path(upload_path)
-        extraction_trace = ["Used human-reviewed corrections from the UI."]
+        # Preserve the original processing trace so metrics (LLM usage, template hits, etc.)
+        # remain accurate after the user submits a review.
+        prior_trace = self._store.get_processing_trace(source_file)
+        extraction_trace = prior_trace + ["Used human-reviewed corrections from the UI."]
         if approve_for_future_matching:
             extraction_trace.append("User explicitly approved this result for future matching.")
+
+        if original_extracted:
+            bad_store = BadPatternStore(self._settings.bad_patterns_path)
+            doc_type = corrected_data.get("document_type", "invoice")
+            learned_patterns: list[str] = []
+            for field, orig_val in original_extracted.items():
+                if field in {"document_type", "source_file"} or orig_val in (None, "", []):
+                    continue
+                corrected_val = corrected_data.get(field)
+                if corrected_val in (None, "", []):
+                    pattern = bad_store.add_pattern(doc_type, field, str(orig_val))
+                    if pattern:
+                        learned_patterns.append(field)
+            if learned_patterns:
+                extraction_trace.append(
+                    f"Learned bad-value patterns for {len(learned_patterns)} field(s) from corrections: "
+                    f"{', '.join(sorted(learned_patterns))}."
+                )
         validation_checks = get_validator(corrected_data.get("document_type", "invoice")).validate(corrected_data)
         learned_template_name = self._learn_from_result(
             saved_path=saved_path,
@@ -254,8 +317,13 @@ class DocumentPipeline:
             "approved_for_future_matching": approve_for_future_matching,
         }
 
+        field_sources = {
+            k: "Manual"
+            for k, v in corrected_data.items()
+            if k not in ("document_type", "source_file") and v not in (None, "", [], {})
+        }
         field_confidence = self._compute_field_confidence(
-            corrected_data, validation_checks, extraction_trace
+            corrected_data, validation_checks, extraction_trace, field_sources
         )
 
         return PipelineResult(
@@ -269,6 +337,7 @@ class DocumentPipeline:
             errors=[],
             extraction_trace=extraction_trace,
             field_confidence=field_confidence,
+            field_sources=field_sources,
         )
 
     def log_error(self, error_type: str, source: str, message: str, severity: str = "error") -> None:
@@ -311,7 +380,8 @@ class DocumentPipeline:
         pass_checks = sum(getattr(check, "status", "") == "pass" for check in validation_checks)
         pass_ratio = (pass_checks / total_checks) if total_checks else 0.0
         if force_learning:
-            if not self._has_required_field_passes(validation_checks):
+            doc_type = extracted_data.get("document_type", "invoice")
+            if not self._has_required_field_passes(validation_checks, doc_type):
                 extraction_trace.append("Skipped template learning because approved data is still missing required fields.")
                 return None
             extraction_trace.append("Bypassed normal learning threshold because the user explicitly approved the result.")
@@ -323,17 +393,19 @@ class DocumentPipeline:
             return None
 
         memory = TemplateMemory(self._settings.template_store_path)
-        signature = TemplateMemory.build_signature(parsed_lines)
 
         spatial_anchors: list[dict] = []
+        spatial_layouts: list = []
         if saved_path.suffix.lower() == ".pdf":
             try:
                 from .spatial_extractor import build_spatial_anchors, extract_spatial_layout
-                layouts = extract_spatial_layout(saved_path)
-                if layouts:
-                    spatial_anchors = build_spatial_anchors(layouts, extracted_data)
+                spatial_layouts = extract_spatial_layout(saved_path)
+                if spatial_layouts:
+                    spatial_anchors = build_spatial_anchors(spatial_layouts, extracted_data)
             except Exception:
                 pass
+
+        signature = TemplateMemory.build_signature(parsed_lines, layouts=spatial_layouts)
 
         template = memory.learn_template(
             saved_path.name, signature, extracted_data, parsed_lines,
@@ -341,32 +413,44 @@ class DocumentPipeline:
         )
         return template.get("template_name")
 
+    # Per-source confidence baselines — Cross-validated is highest because multiple
+    # independent methods independently produced the same value.
+    _SOURCE_BASELINE: dict[str, float] = {
+        "Cross-validated": 0.97,
+        "Manual": 0.95,
+        "LLM": 0.88,
+        "Template": 0.82,
+        "Spatial": 0.78,
+        "Rule-based": 0.72,
+        "Inferred": 0.65,
+    }
+
     @staticmethod
     def _compute_field_confidence(
         extracted_data: dict,
         validation_checks: list,
         extraction_trace: list[str],
+        field_sources: dict[str, str] | None = None,
     ) -> dict[str, float]:
         """Return a 0–1 confidence score for every extracted field.
 
-        The score is built in two stages:
-        1. Presence: missing fields start at 0; present fields start at a
-           baseline that reflects how the value was obtained.
-        2. Validation adjustment: the worst validation outcome for a field
-           anchors the final score within that baseline's range.
+        When *field_sources* is provided, each field's baseline is drawn from
+        its specific extraction method.  Cross-validated fields (multiple methods
+        agreed) receive the highest baseline.  Falls back to a document-level
+        baseline derived from the trace when *field_sources* is absent.
         """
-        # Determine extraction method from the trace so we can set baselines.
+        # Document-level fallback baseline (used when a field has no source entry).
         trace_lower = " ".join(extraction_trace).lower()
         if "llm" in trace_lower or "openai" in trace_lower or "groq" in trace_lower:
-            base_present = 0.88
+            doc_baseline = 0.88
         elif "learned template" in trace_lower or "applied" in trace_lower:
-            base_present = 0.82
+            doc_baseline = 0.82
         elif "spatial" in trace_lower:
-            base_present = 0.78
+            doc_baseline = 0.78
         elif "rule-based" in trace_lower or "regex" in trace_lower:
-            base_present = 0.72
+            doc_baseline = 0.72
         else:
-            base_present = 0.75
+            doc_baseline = 0.75
 
         # Map field → worst validation status across all checks for that field.
         field_worst: dict[str, str] = {}
@@ -378,6 +462,7 @@ class DocumentPipeline:
                 field_worst[fname] = status
 
         _status_multiplier = {"pass": 1.0, "warn": 0.75, "fail": 0.35}
+        _source_baseline = DocumentPipeline._SOURCE_BASELINE
 
         confidence: dict[str, float] = {}
         for key, value in extracted_data.items():
@@ -385,17 +470,123 @@ class DocumentPipeline:
                 continue
             if value in (None, "", [], {}):
                 confidence[key] = 0.0
-            elif key in field_worst:
-                multiplier = _status_multiplier[field_worst[key]]
-                confidence[key] = round(base_present * multiplier, 3)
             else:
-                confidence[key] = base_present
+                source = (field_sources or {}).get(key)
+                base = _source_baseline.get(source, doc_baseline) if source else doc_baseline
+                if key in field_worst:
+                    confidence[key] = round(base * _status_multiplier[field_worst[key]], 3)
+                else:
+                    confidence[key] = base
 
         return confidence
 
     @staticmethod
-    def _has_required_field_passes(validation_checks: list) -> bool:
-        required_fields = {"vendor_name", "invoice_number", "invoice_date", "total_amount"}
+    def _build_field_sources(
+        extracted_data: dict,
+        extraction_trace: list[str],
+    ) -> dict[str, str]:
+        """Return a {field: method} dict describing how each field was obtained.
+
+        Parses the structured trace messages produced by the extraction functions
+        to assign per-field attribution.  Fields whose trace message isn't found
+        fall back to the primary extraction method inferred from the full trace.
+        """
+        sources: dict[str, str] = {}
+        llm_replaced = False   # LLM replaced an incomplete template result
+        llm_primary = False    # LLM was the very first extraction method
+        template_primary = False
+
+        for step in extraction_trace:
+            lower = step.lower()
+
+            # LLM replaced the template/rule-based output entirely — reset.
+            if "llm reasoning layer after incomplete template" in lower:
+                sources = {}
+                llm_replaced = True
+                continue
+
+            # LLM was the primary method (no prior template pass).
+            if "llm reasoning layer for an unseen" in lower:
+                llm_primary = True
+                continue
+
+            # Template anchors were the primary method (no LLM).
+            if ("applied learned template" in lower or
+                    "used learned template anchors" in lower):
+                template_primary = True
+                continue
+
+            # Manual review step — handled at the end.
+            if "human-reviewed corrections" in lower:
+                continue
+
+            # Gap-fill messages: attribute listed fields to the named source.
+            m = _GAP_RE.match(step)
+            if m:
+                source_label = m.group(1).lower()
+                fields = [f.strip() for f in m.group(2).split(",")]
+                if "spatial" in source_label:
+                    method = "Spatial"
+                elif "template" in source_label:
+                    method = "Template"
+                elif "rule" in source_label or "rule-based" in source_label:
+                    method = "Rule-based"
+                else:
+                    method = m.group(1).strip()
+                for f in fields:
+                    sources[f] = method
+                continue
+
+            # Inferred fields.
+            m = _INFER_RE.match(step)
+            if m:
+                for f in [x.strip() for x in m.group(1).split(",")]:
+                    sources[f] = "Inferred"
+                continue
+
+            # Cross-validated fields — multiple methods agreed on the value.
+            if lower.startswith("cross-validated"):
+                fields_str = step.split(":", 1)[-1].strip().rstrip(".")
+                for f in [x.strip() for x in fields_str.split(",")]:
+                    sources[f] = "Cross-validated"
+                continue
+
+            # Restored prior values where LLM returned null — keep prior source.
+            # (Source attribution was already set before the LLM call; leave it.)
+            if "restored prior extraction values" in lower:
+                continue
+
+            # LLM override of a prior value — mark as LLM.
+            if lower.startswith("llm value differs"):
+                fields_str = step.split("(llm used):", 1)[-1].strip().rstrip(".")
+                for f in [x.strip() for x in fields_str.split(",")]:
+                    sources[f] = "LLM"
+                continue
+
+            # Bad-pattern fields are not a source of value — skip.
+            if _BAD_RE.match(step):
+                continue
+
+        # Assign default method to every non-null field not yet attributed.
+        if llm_replaced or llm_primary:
+            default = "LLM"
+        elif template_primary:
+            default = "Template"
+        else:
+            default = "Rule-based"
+
+        for key, value in extracted_data.items():
+            if key in ("document_type", "source_file"):
+                continue
+            if key not in sources and value not in (None, "", [], {}):
+                sources[key] = default
+
+        return sources
+
+    @staticmethod
+    def _has_required_field_passes(validation_checks: list, doc_type: str = "invoice") -> bool:
+        from .schema_config import get_required_fields
+        required_fields = get_required_fields(doc_type) or {"vendor_name", "total_amount"}
         passing_fields = {
             getattr(check, "field", "")
             for check in validation_checks
