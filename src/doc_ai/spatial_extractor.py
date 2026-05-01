@@ -116,9 +116,15 @@ _LABEL_TO_FIELD: dict[str, str] = {
     # Business doc
     "company name": "company_name",
     "prepared by": "prepared_by",
+    "approved by": "approved_by",
     "report period": "report_period",
     "period": "report_period",
+    "period ending": "report_period",
+    "reporting period": "report_period",
+    "report id": "report_id",
     "document type": "document_subtype",
+    "document classification": "classification",
+    "classification": "classification",
 }
 
 # ---------------------------------------------------------------------------
@@ -264,11 +270,58 @@ def _stacked_pairs(rows: list[SpatialRow]) -> dict[str, str]:
 # Public API
 # ---------------------------------------------------------------------------
 
+def _layout_from_tesseract(page: Any, page_number: int) -> SpatialLayout | None:
+    """
+    Build a SpatialLayout from Tesseract OCR word bounding boxes.
+    Called when pdfplumber finds no extractable text (scanned PDF page).
+    Word pixel coordinates are scaled back to PDF point space.
+    """
+    try:
+        import pytesseract
+        pil_image = page.to_image(resolution=150).original
+        ocr = pytesseract.image_to_data(pil_image, output_type=pytesseract.Output.DICT)
+    except Exception:
+        return None
+
+    img_w = pil_image.width or 1
+    img_h = pil_image.height or 1
+    sx = page.width / img_w
+    sy = page.height / img_h
+
+    words: list[SpatialWord] = []
+    for i, text in enumerate(ocr["text"]):
+        text = (text or "").strip()
+        if not text:
+            continue
+        try:
+            conf = int(ocr["conf"][i])
+        except (ValueError, TypeError):
+            conf = 0
+        if conf < 30:
+            continue
+        x = float(ocr["left"][i]) * sx
+        y = float(ocr["top"][i]) * sy
+        w = float(ocr["width"][i]) * sx
+        h = float(ocr["height"][i]) * sy
+        words.append(SpatialWord(text=text, x0=x, top=y, x1=x + w, bottom=y + h))
+
+    if not words:
+        return None
+    return SpatialLayout(
+        page_width=float(page.width),
+        page_height=float(page.height),
+        rows=_group_into_rows(words),
+        page_number=page_number,
+    )
+
+
 def extract_spatial_layout(pdf_path: Path) -> list[SpatialLayout]:
     """
-    Return per-page SpatialLayout objects for *pdf_path* using pdfplumber.
-    Returns an empty list when pdfplumber is not installed or the file cannot
-    be opened.
+    Return per-page SpatialLayout objects for *pdf_path*.
+
+    For native PDFs, pdfplumber word extraction is used.  For scanned pages
+    (no extractable text layer), the function falls back to Tesseract OCR
+    bounding boxes so that the same spatial fingerprinting works on both.
     """
     try:
         import pdfplumber
@@ -296,18 +349,73 @@ def extract_spatial_layout(pdf_path: Path) -> list[SpatialLayout]:
                     for w in (words_raw or [])
                     if w.get("text", "").strip()
                 ]
-                rows = _group_into_rows(words)
-                layouts.append(
-                    SpatialLayout(
+                if words:
+                    rows = _group_into_rows(words)
+                    layouts.append(SpatialLayout(
                         page_width=float(page.width),
                         page_height=float(page.height),
                         rows=rows,
                         page_number=page_number,
-                    )
-                )
+                    ))
+                else:
+                    layout = _layout_from_tesseract(page, page_number)
+                    if layout:
+                        layouts.append(layout)
     except Exception:
         return []
     return layouts
+
+
+# ---------------------------------------------------------------------------
+# Zone-density fingerprint
+# ---------------------------------------------------------------------------
+
+_ZONE_COLS = 8
+_ZONE_ROWS = 10
+
+
+def build_zone_density(
+    layouts: list[SpatialLayout],
+    grid_cols: int = _ZONE_COLS,
+    grid_rows: int = _ZONE_ROWS,
+) -> list[float]:
+    """
+    Divide the first page into a grid and measure character density per zone.
+
+    Returns a flat list of grid_cols * grid_rows floats in [0.0, 1.0].
+    This fingerprint is content-independent: only *where* text appears on the
+    page matters, not what the text says.  Documents with the same layout but
+    different company names or values produce nearly identical vectors.
+    Works for both native PDFs (pdfplumber) and scanned PDFs (Tesseract).
+    """
+    n = grid_cols * grid_rows
+    if not layouts:
+        return [0.0] * n
+
+    layout = layouts[0]
+    counts = [0] * n
+    for row in layout.rows:
+        for word in row.words:
+            nx = layout.norm_x(word.x0)
+            ny = layout.norm_y(word.top)
+            col_idx = min(int(nx * grid_cols), grid_cols - 1)
+            row_idx = min(int(ny * grid_rows), grid_rows - 1)
+            counts[row_idx * grid_cols + col_idx] += len(word.text)
+
+    peak = max(counts) if any(counts) else 1
+    return [round(c / peak, 4) for c in counts]
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two equal-length vectors. No external deps."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = sum(x * x for x in a) ** 0.5
+    mag_b = sum(x * x for x in b) ** 0.5
+    if mag_a == 0.0 or mag_b == 0.0:
+        return 0.0
+    return round(dot / (mag_a * mag_b), 4)
 
 
 def extract_fields_from_layout(layouts: list[SpatialLayout]) -> dict[str, Any]:
@@ -339,6 +447,10 @@ def extract_fields_from_layout(layouts: list[SpatialLayout]) -> dict[str, Any]:
     return canonical
 
 
+_SKIP_ANCHOR_FIELDS = {"document_type", "source_file"}
+_MIN_ANCHOR_VALUE_LEN = 3
+
+
 def build_spatial_anchors(
     layouts: list[SpatialLayout],
     extracted: dict[str, Any],
@@ -347,6 +459,10 @@ def build_spatial_anchors(
     For each field successfully extracted in *extracted*, record its
     normalised page position so future documents can look at the right
     region.  Only anchors from the first page are stored.
+
+    Pass 1 — label-based: rows that match _LABEL_TO_FIELD get a named anchor.
+    Pass 2 — value-scan: any remaining field whose value text appears verbatim
+    in any row gets a position anchor (label_text may be empty).
 
     Returns a list of anchor dicts ready to embed in the template JSON.
     """
@@ -357,6 +473,7 @@ def build_spatial_anchors(
     anchors: list[dict] = []
     seen_fields: set[str] = set()
 
+    # Pass 1: label-based anchors
     for row in layout.rows:
         pair = _row_to_pair(row)
         if not pair:
@@ -367,19 +484,48 @@ def build_spatial_anchors(
             continue
         if field_name not in extracted:
             continue
-        # Only anchor if the extracted value is a reasonable match
         ext_val = str(extracted[field_name]).strip()
-        if not ext_val or ext_val.lower() not in value.lower() and value.lower() not in ext_val.lower():
+        if not ext_val or (ext_val.lower() not in value.lower() and value.lower() not in ext_val.lower()):
             continue
-        anchors.append(
-            {
-                "field": field_name,
-                "label_text": raw_label,
+        anchors.append({
+            "field": field_name,
+            "label_text": raw_label,
+            "norm_x": layout.norm_x(row.x0),
+            "norm_y": layout.norm_y(row.top),
+        })
+        seen_fields.add(field_name)
+
+    # Pass 2: value-scan for fields that weren't anchored by a label
+    for field, value in extracted.items():
+        if field in seen_fields or field in _SKIP_ANCHOR_FIELDS:
+            continue
+        if value in (None, "", []):
+            continue
+        value_text = str(value).strip()
+        if len(value_text) < _MIN_ANCHOR_VALUE_LEN:
+            continue
+        for row in layout.rows:
+            if value_text.lower() not in row.text.lower():
+                continue
+            pair = _row_to_pair(row)
+            row_label = pair[0] if pair else ""
+            # If this row's label maps to a DIFFERENT field, don't store the label —
+            # recording a foreign label would cause extract_by_spatial_anchors to
+            # pull the wrong value on future documents.
+            mapped_field = _LABEL_TO_FIELD.get(row_label, "")
+            label_to_store = row_label if (not mapped_field or mapped_field == field) else ""
+            # Skip position-only anchors — without a verifiable label they will
+            # match random text at the same position in unrelated documents.
+            if not label_to_store:
+                break
+            anchors.append({
+                "field": field,
+                "label_text": label_to_store,
                 "norm_x": layout.norm_x(row.x0),
                 "norm_y": layout.norm_y(row.top),
-            }
-        )
-        seen_fields.add(field_name)
+            })
+            seen_fields.add(field)
+            break
 
     return anchors
 
@@ -417,14 +563,19 @@ def extract_by_spatial_anchors(
             if abs(nx - ax) > x_tol or abs(ny - ay) > y_tol:
                 continue
             pair = _row_to_pair(row)
+            # Exact label match
             if pair and pair[0] == label_text:
                 extracted[field_name] = pair[1]
                 break
-            # Looser: label text appears anywhere in the row
-            if label_text and label_text in row.text.lower():
-                pair = _row_to_pair(row)
+            # Label text appears anywhere in the row
+            if label_text and label_text.lower() in row.text.lower():
                 if pair:
                     extracted[field_name] = pair[1]
                     break
+            # Value-based anchor (no label): return value part if it's a pair,
+            # otherwise return the full row text so the position still wins.
+            if not label_text:
+                extracted[field_name] = pair[1] if pair else row.text.strip()
+                break
 
     return extracted

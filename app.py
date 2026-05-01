@@ -200,7 +200,7 @@ def render_pdf_preview(upload_path: str) -> None:
 
     st.caption("Preview is rendered as images so it works reliably in the browser.")
     for index, image_bytes in enumerate(page_images, start=1):
-        st.image(image_bytes, caption=f"Page {index}", use_container_width=True)
+        st.image(image_bytes, caption=f"Page {index}", width="stretch")
 
     st.download_button(
         "Download original PDF",
@@ -226,7 +226,8 @@ def coerce_form_data(source_file: str, values: dict[str, str]) -> dict[str, obje
         else:
             corrected[field] = text or None
     corrected["document_type"] = corrected.get("document_type") or "invoice"
-    corrected["currency"] = corrected.get("currency") or "USD"
+    if corrected["document_type"] == "invoice":
+        corrected["currency"] = corrected.get("currency") or "USD"
     return corrected
 
 
@@ -246,10 +247,31 @@ def _line_items_to_json(items) -> str:
     return json.dumps(items, indent=2)
 
 
-def render_completeness_bar(extracted_data: dict) -> None:
+def _resolve_schema_fields(
+    settings_data_dir, doc_type: str
+) -> tuple[list[str], list[str], set[str]]:
+    """Return (field_order, list_fields, optional_fields) from schema settings for *doc_type*."""
+    schema_cfg = SchemaConfig(settings_data_dir / "schema_settings.json")
+    selected_keys = schema_cfg.get_selected_fields(doc_type)
+    catalog = FIELD_CATALOG.get(doc_type, [])
+    list_field_set = {f["key"] for f in catalog if "(JSON)" in f["label"]}
+    required_set = {f["key"] for f in catalog if f["required"]}
+    field_order = ["document_type"] + selected_keys
+    list_fields = [k for k in selected_keys if k in list_field_set]
+    optional_fields = {k for k in selected_keys if k not in required_set}
+    return field_order, list_fields, optional_fields
+
+
+def render_completeness_bar(extracted_data: dict, settings=None) -> None:
     doc_type = extracted_data.get("document_type", "invoice")
-    field_order, optional_fields = _fields_for(doc_type)
-    list_fields = LIST_FIELDS_BY_TYPE.get(doc_type, [])
+
+    if settings is not None:
+        field_order, list_fields, optional_fields = _resolve_schema_fields(
+            settings.data_dir, doc_type
+        )
+    else:
+        field_order, optional_fields = _fields_for(doc_type)
+        list_fields = LIST_FIELDS_BY_TYPE.get(doc_type, [])
 
     filled = sum(1 for f in field_order if _is_filled(extracted_data.get(f)))
     filled += sum(1 for lf in list_fields if extracted_data.get(lf))
@@ -283,6 +305,22 @@ def _confidence_badge(score: float) -> str:
     return ":red[not extracted]"
 
 
+_SOURCE_COLORS = {
+    "Cross-validated": "green",
+    "LLM": "violet",
+    "Template": "blue",
+    "Spatial": "blue",
+    "Rule-based": "gray",
+    "Inferred": "orange",
+    "Manual": "green",
+}
+
+
+def _source_badge(method: str) -> str:
+    color = _SOURCE_COLORS.get(method, "gray")
+    return f":{color}[{method}]"
+
+
 def render_review_form(
     pipeline: DocumentPipeline,
     result,
@@ -293,10 +331,14 @@ def render_review_form(
     st.caption("If extraction missed anything, update the values below and save the reviewed result.")
 
     doc_type = result.extracted_data.get("document_type", "invoice")
-    active_fields, _ = _fields_for(doc_type)
-    list_fields = LIST_FIELDS_BY_TYPE.get(doc_type, [])
+    _field_order, list_fields, _ = _resolve_schema_fields(
+        pipeline._settings.data_dir, doc_type
+    )
+    list_field_set = set(list_fields)
+    active_fields = [k for k in _field_order if k not in list_field_set]
 
     field_confidence = getattr(result, "field_confidence", {})
+    field_sources = getattr(result, "field_sources", {})
     defaults = {field: result.extracted_data.get(field) for field in active_fields}
     with st.form("review_form", clear_on_submit=False):
         form_values: dict[str, str] = {}
@@ -305,9 +347,15 @@ def render_review_form(
             target_col = col_left if index % 2 == 0 else col_right
             current = defaults.get(field)
             score = field_confidence.get(field)
+            source = field_sources.get(field)
             label = field.replace("_", " ").title()
+            badges: list[str] = []
+            if source is not None:
+                badges.append(_source_badge(source))
             if score is not None:
-                label = f"{label}  —  {_confidence_badge(score)}"
+                badges.append(_confidence_badge(score))
+            if badges:
+                label = f"{label}  —  {'  ·  '.join(badges)}"
             with target_col:
                 form_values[field] = st.text_input(
                     label,
@@ -345,6 +393,7 @@ def render_review_form(
             learn_from_upload=learn_from_upload,
             approve_for_future_matching=approve_for_future_matching,
             content_hash=result.content_hash,
+            original_extracted=result.extracted_data,
         )
         st.session_state["last_result"] = reviewed_result
         st.session_state.manual_corrections_total += 1
@@ -426,7 +475,7 @@ def _parse_template_match(trace: list[str]) -> tuple[str, str]:
 
 
 def _llm_used(trace: list[str]) -> bool:
-    keywords = ("llm", "language model", "openai", "gemini", "anthropic", "claude")
+    keywords = ("llm reasoning layer", "used openai", "used gemini", "used anthropic", "used ollama")
     return any(any(kw in step.lower() for kw in keywords) for step in trace)
 
 
@@ -736,7 +785,7 @@ def render_single_tab(
 
     with review_col:
         st.subheader("Current extracted fields")
-        render_completeness_bar(result.extracted_data)
+        render_completeness_bar(result.extracted_data, pipeline._settings)
         st.json(result.extracted_data)
         render_approval_actions(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
         st.subheader("Validation report")
@@ -748,6 +797,15 @@ def render_single_tab(
         render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
 
     st.subheader("Agent trace")
+    field_sources = getattr(result, "field_sources", {})
+    if field_sources:
+        source_df = pd.DataFrame(
+            [
+                {"Field": k.replace("_", " ").title(), "Method": v}
+                for k, v in sorted(field_sources.items())
+            ]
+        )
+        st.dataframe(source_df, hide_index=True, use_container_width=True)
     if result.extraction_trace:
         for step in result.extraction_trace:
             st.write(f"- {step}")
@@ -935,6 +993,7 @@ def _render_bulk_results(
             learn_from_upload=learn_from_upload,
             approve_for_future_matching=approve_future,
             content_hash=current.content_hash,
+            original_extracted=current.extracted_data,
         )
         st.session_state["bulk_reviewed"].append(reviewed)
         st.session_state["bulk_review_index"] = review_index + 1
@@ -1175,8 +1234,11 @@ def main() -> None:
                     if Path(db).exists():
                         Path(db).unlink()
                     tmpl.write_text("[]", encoding="utf-8")
+                    for f in settings.output_dir.iterdir():
+                        if f.is_file():
+                            f.unlink()
                     st.session_state.clear()
-                    st.success("Database and template memory cleared.")
+                    st.success("Database, template memory, and output files cleared.")
                     st.rerun()
             with col_no:
                 if st.button("Cancel", use_container_width=True):
