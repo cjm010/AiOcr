@@ -105,20 +105,20 @@ def populated_db(tmp_path: Path) -> Path:
             ["Applied learned template `acme_v1` from prior approved upload."],
             processed_at=str(today),
         )
-        # Doc 2 — LLM fallback, NDA
+        # Doc 2 — LLM fallback, NDA (no template matched)
         _add_doc(
             conn,
             "doc_llm_1.pdf",
             "nda",
-            ["No template matched; falling back to LLM provider openai."],
+            ["Used the LLM reasoning layer for an unseen or weakly matched document format."],
             processed_at=str(today),
         )
-        # Doc 3 — LLM fallback, lab report, yesterday
+        # Doc 3 — LLM fallback, lab report, yesterday (template insufficient)
         _add_doc(
             conn,
             "doc_llm_2.pdf",
             "lab_report",
-            ["Used groq for unfamiliar layout."],
+            ["Used the LLM reasoning layer after incomplete template extraction."],
             processed_at=str(today - timedelta(days=1)),
         )
         # Doc 4 — manually corrected (review form)
@@ -135,7 +135,7 @@ def populated_db(tmp_path: Path) -> Path:
             "doc_llm_then_manual.pdf",
             "business_doc",
             [
-                "Falling back to LLM (openai) because template confidence was low.",
+                "Used the LLM reasoning layer after incomplete template extraction.",
                 "Used human-reviewed corrections from the UI.",
             ],
             processed_at=str(today),
@@ -271,8 +271,9 @@ class TestLlmUsageDaily:
         assert list(df.columns) == ["date", "llm_documents"]
         assert len(df) == 7
         # Two LLM docs today (doc_llm_1 + doc_llm_then_manual), one yesterday.
+        # Use UTC date to match the fixture (datetime.utcnow) and SQLite's date('now').
         df["date"] = pd.to_datetime(df["date"]).dt.date
-        today = date.today()
+        today = datetime.utcnow().date()
         yesterday = today - timedelta(days=1)
         today_count = int(df.loc[df["date"] == today, "llm_documents"].sum())
         yesterday_count = int(df.loc[df["date"] == yesterday, "llm_documents"].sum())

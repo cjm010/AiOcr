@@ -70,6 +70,16 @@ class BaseExtractor:
     def extract(self, parsed_document: ParsedDocument) -> dict[str, Any]:
         raise NotImplementedError
 
+    @staticmethod
+    def _apply_patterns(text: str, patterns: dict[str, list[str]], extracted: dict[str, Any]) -> None:
+        """Apply FIELD_PATTERNS regex dict against *text*, writing matched values into *extracted*."""
+        for field, field_patterns in patterns.items():
+            for pattern in field_patterns:
+                m = re.search(pattern, text, re.IGNORECASE)
+                if m:
+                    extracted[field] = m.group("value").strip()
+                    break
+
 
 # ---------------------------------------------------------------------------
 # Document type detection
@@ -129,6 +139,9 @@ _LINE_ITEM_RE = re.compile(
     re.MULTILINE,
 )
 _LINE_ITEM_SKIP = {"item", "description", "product", "service", "qty", "quantity"}
+_DOCUMENT_SUBTYPE_RE = re.compile(
+    r"^([A-Z][A-Z ]+?)(?=\s+[A-Za-z][a-z]|\s+\d|\||\s*$)"
+)
 
 
 def _extract_line_items(raw_text: str) -> list[dict[str, Any]]:
@@ -190,12 +203,7 @@ class RuleBasedMedicalDischargeExtractor(BaseExtractor):
         text = parsed_document.raw_text
         extracted = _empty_medical_discharge(parsed_document.file_name)
 
-        for field, patterns in self.FIELD_PATTERNS.items():
-            for pattern in patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    extracted[field] = match.group("value").strip()
-                    break
+        self._apply_patterns(text, self.FIELD_PATTERNS, extracted)
 
         # Extract medications as a list (lines following "Medications:" header)
         med_match = re.search(r"Medications?\s*:(.*?)(?:\n\n|\Z)", text, re.IGNORECASE | re.DOTALL)
@@ -248,12 +256,7 @@ class RuleBasedNDAExtractor(BaseExtractor):
         text = parsed_document.raw_text
         extracted = _empty_nda(parsed_document.file_name)
 
-        for field, patterns in self.FIELD_PATTERNS.items():
-            for pattern in patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    extracted[field] = match.group("value").strip()
-                    break
+        self._apply_patterns(text, self.FIELD_PATTERNS, extracted)
 
         lower = text.lower()
         if "mutual" in lower:
@@ -320,12 +323,7 @@ class RuleBasedLabReportExtractor(BaseExtractor):
                 extracted["lab_name"] = line
                 break
 
-        for field, patterns in self.FIELD_PATTERNS.items():
-            for pattern in patterns:
-                m = re.search(pattern, text, re.IGNORECASE)
-                if m:
-                    extracted[field] = m.group("value").strip()
-                    break
+        self._apply_patterns(text, self.FIELD_PATTERNS, extracted)
 
         # Clinical interpretation block
         interp_m = re.search(
@@ -399,32 +397,45 @@ class RuleBasedBusinessDocExtractor(BaseExtractor):
         lines = [l.strip() for l in text.splitlines() if l.strip()]
         extracted = _empty_business_doc(parsed_document.file_name)
 
-        # Company name: first substantive non-confidential line
+        # Company name: first substantive non-confidential line.
+        # Parsers like unstructured merge the address onto the same line:
+        #   "Meridian Cloud Inc. 1100 CloudStreet, Denver, CO 80202 | Confidential..."
+        # Strip at the pipe first (removes the "| Confidential" tag), then strip any
+        # trailing street address (3+ digit number followed by street words).
         content_lines = [l for l in lines if not l.startswith("CONFIDENTIAL")]
         if content_lines:
-            extracted["company_name"] = content_lines[0]
+            raw_first = content_lines[0]
+            company = raw_first.split("|")[0].strip()
+            company = re.sub(r"\s+\d{3,}[\d\s,.\w]*$", "", company).strip() or company
+            extracted["company_name"] = company
 
-        # Document subtype: first ALL-CAPS line that isn't a section header or address
+        # Document subtype: first line whose leading words are ALL-CAPS.
+        # Handles both: a clean all-caps line (pdfplumber) and an all-caps prefix
+        # followed by mixed-case metadata on the same line (unstructured), e.g.:
+        #   "STRATEGIC INITIATIVE BRIEFING Period Ending: March 19, 2025 | Report ID..."
+        # The lookahead stops at the first mixed-case word, digit, or pipe.
         _SKIP_SUBTYPES = {"EXECUTIVE SUMMARY", "KEY PERFORMANCE INDICATORS", "STRATEGIC RECOMMENDATIONS"}
         for cl in content_lines[1:]:
-            if cl == cl.upper() and len(cl) > 6 and cl not in _SKIP_SUBTYPES and "|" not in cl and not cl[0].isdigit():
-                extracted["document_subtype"] = cl
+            if cl[0:1].isdigit():
+                continue
+            m = _DOCUMENT_SUBTYPE_RE.match(cl)
+            if not m:
+                continue
+            candidate = m.group(1).strip()
+            if len(candidate) > 6 and candidate not in _SKIP_SUBTYPES and "|" not in candidate:
+                extracted["document_subtype"] = candidate.title()
                 break
 
-        for field, patterns in self.FIELD_PATTERNS.items():
-            for pattern in patterns:
-                m = re.search(pattern, text, re.IGNORECASE)
-                if m:
-                    extracted[field] = m.group("value").strip()
-                    break
+        self._apply_patterns(text, self.FIELD_PATTERNS, extracted)
 
-        # Executive summary block
+        # Executive summary block.
+        # Allow either a newline or a space after the header (unstructured may not emit a newline).
         exec_m = re.search(
-            r"EXECUTIVE\s+SUMMARY\s*\n(.*?)(?:\n[A-Z][A-Z ]{4,}\n|\Z)",
+            r"EXECUTIVE\s+SUMMARY[\s\n](.*?)(?=\n[A-Z][A-Z ]{4,}(?:\n|\s)|\Z)",
             text, re.IGNORECASE | re.DOTALL,
         )
         if exec_m:
-            extracted["executive_summary"] = exec_m.group(1).strip()
+            extracted["executive_summary"] = " ".join(exec_m.group(1).split())
 
         # KPI table: multi-line format — metric / current / prior / variance (/ status)
         kpis: list[dict] = []
@@ -494,6 +505,20 @@ class RuleBasedInvoiceExtractor(BaseExtractor):
             r"Date\s*:\s*(?P<value>[\d/\-]+)",
         ],
         "due_date": [r"Due\s*Date\s*:\s*(?P<value>[\d/\-]+)"],
+        "bill_to": [
+            r"Bill\s*To\s*:\s*(?P<value>.+)",
+            r"Billed\s*To\s*:\s*(?P<value>.+)",
+            r"Customer\s*:\s*(?P<value>.+)",
+            r"Client\s*:\s*(?P<value>.+)",
+        ],
+        "po_number": [
+            r"P\.?O\.?\s*(?:Number|No\.?|#)\s*:\s*(?P<value>[\w\-]+)",
+            r"Purchase\s+Order\s*(?:Number|No\.?|#)?\s*:\s*(?P<value>[\w\-]+)",
+        ],
+        "payment_terms": [
+            r"Payment\s+Terms\s*:\s*(?P<value>.+)",
+            r"Terms\s*:\s*(?P<value>(?:Net\s*\d+|Due\s+on\s+[Rr]eceipt|[Cc][Oo][Dd]|.{3,40}))",
+        ],
         "subtotal": [r"Subtotal\s*:?\s*\$?(?P<value>[\d,]+(?:\.\d{1,2})?)"],
         "tax": [r"Tax\s*(?:Rate)?\s*:?\s*\$?(?P<value>[\d,]+(?:\.\d{1,2})?)"],
         "shipping_handling": [
@@ -524,12 +549,7 @@ class RuleBasedInvoiceExtractor(BaseExtractor):
         text = parsed_document.raw_text
         extracted: dict[str, Any] = _empty_invoice(parsed_document.file_name)
 
-        for field, patterns in self.FIELD_PATTERNS.items():
-            for pattern in patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    extracted[field] = match.group("value").strip()
-                    break
+        self._apply_patterns(text, self.FIELD_PATTERNS, extracted)
 
         _coerce_money_fields(extracted)
         extracted["line_items"] = _extract_line_items(text)
@@ -548,7 +568,8 @@ class TemplateOnlyExtractor(BaseExtractor):
         trace = ["Started template-only extraction."]
         lines = parsed_document.sections
         signature = TemplateMemory.build_signature(lines)
-        match = self._template_memory.find_best_match(signature)
+        doc_type = detect_document_type(parsed_document.raw_text)
+        match = self._template_memory.find_best_match(signature, document_type=doc_type)
         if not match or match.score < 0.55:
             raise ExtractionError("No close learned template was found for this document.")
 
@@ -556,6 +577,153 @@ class TemplateOnlyExtractor(BaseExtractor):
         extracted = _empty_invoice(parsed_document.file_name)
         extracted.update(_extract_from_template(match.template, parsed_document.raw_text))
         return extracted, trace
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers used by AdaptiveInvoiceAgent and LLMAssistedInvoiceAgent
+# ---------------------------------------------------------------------------
+
+def _collect_spatial_data(
+    parsed_document: "ParsedDocument",
+    trace: list[str],
+) -> tuple[dict[str, Any], list]:
+    """Extract spatial fields and layouts from a PDF.  Returns (fields, layouts)."""
+    spatial_fields: dict[str, Any] = {}
+    spatial_layouts: list = []
+    if parsed_document.file_path and parsed_document.file_path.suffix.lower() == ".pdf":
+        try:
+            from .spatial_extractor import extract_spatial_layout, extract_fields_from_layout
+            spatial_layouts = extract_spatial_layout(parsed_document.file_path)
+            if spatial_layouts:
+                spatial_fields = extract_fields_from_layout(spatial_layouts)
+                if spatial_fields:
+                    _sf_names = ", ".join(sorted(spatial_fields))
+                    trace.append(
+                        f"Spatial PDF extraction found {len(spatial_fields)} field(s) by page position: "
+                        f"{_sf_names}."
+                    )
+        except Exception:
+            pass
+    return spatial_fields, spatial_layouts
+
+
+def _apply_spatial_anchors(
+    extracted: dict[str, Any],
+    spatial_layouts: list,
+    template_match: Any,
+    trace: list[str],
+) -> None:
+    """Fill missing fields in *extracted* using stored spatial anchor positions."""
+    if not (spatial_layouts and template_match.template.get("spatial_anchors")):
+        return
+    try:
+        from .spatial_extractor import extract_by_spatial_anchors
+        anchor_fields = extract_by_spatial_anchors(
+            spatial_layouts, template_match.template["spatial_anchors"]
+        )
+        if anchor_fields:
+            filled = [
+                f for f, v in anchor_fields.items()
+                if extracted.get(f) in (None, "", []) and v not in (None, "", [])
+            ]
+            for f in filled:
+                extracted[f] = anchor_fields[f]
+            if filled:
+                trace.append(
+                    f"Spatial template anchors filled {len(filled)} missing field(s) by page position: "
+                    f"{', '.join(sorted(filled))}."
+                )
+    except Exception:
+        pass
+
+
+def _fill_rule_based_gaps(
+    extracted: dict[str, Any],
+    rule_extracted: dict[str, Any],
+    trace: list[str],
+    source: str = "Rule-based extraction",
+) -> None:
+    """Copy fields from *rule_extracted* into *extracted* wherever the value is still missing."""
+    gaps = [
+        f for f, v in rule_extracted.items()
+        if extracted.get(f) in (None, "", []) and v not in (None, "", [])
+    ]
+    for f in gaps:
+        extracted[f] = rule_extracted[f]
+    if gaps:
+        trace.append(
+            f"{source} filled {len(gaps)} gap(s): {', '.join(sorted(gaps))}."
+        )
+
+
+def _merge_llm_result(
+    extracted: dict[str, Any],
+    llm_result: dict[str, Any],
+    prior_values: dict[str, Any],
+    trace: list[str],
+) -> None:
+    """Merge *llm_result* into *extracted* using prior extraction values for cross-validation.
+
+    Rules (applied per field):
+    - LLM has a value  →  use it; if prior also had a value, compare for agreement
+    - LLM is null, prior has a value  →  restore prior (don't discard good prior work)
+    - LLM is null, prior is null  →  stays null
+    """
+    _empty = (None, "", [], {})
+    cross_validated: list[str] = []
+    llm_overrides: list[str] = []
+    prior_restored: list[str] = []
+
+    for k, llm_v in llm_result.items():
+        if k in ("document_type", "source_file"):
+            extracted[k] = llm_result[k]
+            continue
+        prior_v = prior_values.get(k)
+        if llm_v not in _empty:
+            extracted[k] = llm_v
+            if prior_v not in _empty:
+                if str(llm_v).strip().lower() == str(prior_v).strip().lower():
+                    cross_validated.append(k)
+                else:
+                    llm_overrides.append(k)
+        # else: LLM returned null — prior value (if any) stays in extracted
+
+    # Restore prior values for fields LLM omitted entirely
+    for k, prior_v in prior_values.items():
+        if k in ("document_type", "source_file"):
+            continue
+        if extracted.get(k) in _empty and prior_v not in _empty:
+            extracted[k] = prior_v
+            prior_restored.append(k)
+
+    if cross_validated:
+        trace.append(
+            f"Cross-validated — multiple methods agree on: {', '.join(sorted(cross_validated))}."
+        )
+    if llm_overrides:
+        trace.append(
+            f"LLM value differs from prior extraction (LLM used): {', '.join(sorted(llm_overrides))}."
+        )
+    if prior_restored:
+        trace.append(
+            f"Restored prior extraction values where LLM returned null: {', '.join(sorted(prior_restored))}."
+        )
+
+
+def _apply_field_inference(
+    extracted: dict[str, Any],
+    raw_text: str,
+    trace: list[str],
+) -> None:
+    """Run semantic heuristics to infer any remaining empty fields."""
+    inferred = _infer_missing_fields(raw_text, extracted)
+    if inferred:
+        extracted.update(inferred)
+        trace.append(
+            f"Inferred additional fields from semantic heuristics: {', '.join(sorted(inferred))}."
+        )
+    else:
+        trace.append("No additional missing fields could be inferred.")
 
 
 class AdaptiveInvoiceAgent(BaseExtractor):
@@ -570,24 +738,12 @@ class AdaptiveInvoiceAgent(BaseExtractor):
     def extract_with_trace(self, parsed_document: ParsedDocument) -> tuple[dict[str, Any], list[str]]:
         trace: list[str] = []
         lines = parsed_document.sections
-        signature = TemplateMemory.build_signature(lines)
+        spatial_fields, spatial_layouts = _collect_spatial_data(parsed_document, trace)
+        signature = TemplateMemory.build_signature(lines, layouts=spatial_layouts)
         trace.append("Generated document signature from top lines and keywords.")
 
-        # Spatial extraction from PDF (lazy — only if pdfplumber available)
-        spatial_fields: dict[str, Any] = {}
-        spatial_layouts = []
-        if parsed_document.file_path and parsed_document.file_path.suffix.lower() == ".pdf":
-            try:
-                from .spatial_extractor import extract_spatial_layout, extract_fields_from_layout
-                spatial_layouts = extract_spatial_layout(parsed_document.file_path)
-                if spatial_layouts:
-                    spatial_fields = extract_fields_from_layout(spatial_layouts)
-                    if spatial_fields:
-                        trace.append(f"Spatial PDF extraction found {len(spatial_fields)} field(s) by page position.")
-            except Exception:
-                pass
-
-        template_match = self._template_memory.find_best_match(signature)
+        doc_type = detect_document_type(parsed_document.raw_text)
+        template_match = self._template_memory.find_best_match(signature, document_type=doc_type)
         if template_match:
             trace.append(
                 f"Best learned template candidate was `{template_match.template.get('template_name', 'unknown')}` "
@@ -596,40 +752,39 @@ class AdaptiveInvoiceAgent(BaseExtractor):
         else:
             trace.append("No learned template candidates were available yet.")
 
-        doc_type = detect_document_type(parsed_document.raw_text)
         if template_match and template_match.score >= 0.55:
-            extracted = _empty_schema(parsed_document.file_name, doc_type)
-            extracted.update(_extract_from_template(template_match.template, parsed_document.raw_text))
-            # If the template has spatial anchors, use them to extract / confirm fields
-            if spatial_layouts and template_match.template.get("spatial_anchors"):
-                try:
-                    from .spatial_extractor import extract_by_spatial_anchors
-                    anchor_fields = extract_by_spatial_anchors(spatial_layouts, template_match.template["spatial_anchors"])
-                    if anchor_fields:
-                        extracted.update(anchor_fields)
-                        trace.append(f"Spatial template anchors matched {len(anchor_fields)} field(s) at expected page positions.")
-                except Exception:
-                    pass
-            trace.append("Applied learned template anchors to extract fields.")
+            # Rule-based provides the reliable baseline (respects field-specific patterns/trimming).
+            # Template text anchors and spatial anchors then fill remaining gaps.
+            extracted = self._rule_based.extract(parsed_document)
+            _fill_rule_based_gaps(
+                extracted,
+                _extract_from_template(template_match.template, parsed_document.raw_text),
+                trace,
+                source="Template text anchors",
+            )
+            _apply_spatial_anchors(extracted, spatial_layouts, template_match, trace)
+            _filled = sorted(
+                k for k, v in extracted.items()
+                if k not in ("document_type", "source_file") and v not in (None, "", [])
+            )
+            trace.append(
+                f"Applied learned template anchors to extract fields. "
+                f"Fields with values: {', '.join(_filled) or 'none'}."
+            )
         else:
             extracted = self._rule_based.extract(parsed_document)
-            trace.append("Fell back to rule-based label and regex extraction.")
+            _filled = sorted(
+                k for k, v in extracted.items()
+                if k not in ("document_type", "source_file") and v not in (None, "", [])
+            )
+            trace.append(
+                f"Fell back to rule-based label and regex extraction. "
+                f"Fields with values: {', '.join(_filled) or 'none'}."
+            )
         trace.append(f"Detected document type: {doc_type}.")
 
-        # Fill any remaining empty fields from spatial extraction
-        spatial_filled = [f for f, v in spatial_fields.items() if extracted.get(f) in (None, "", []) and v]
-        for f in spatial_filled:
-            extracted[f] = spatial_fields[f]
-        if spatial_filled:
-            trace.append(f"Filled {len(spatial_filled)} missing field(s) from spatial extraction: {', '.join(sorted(spatial_filled))}.")
-
-        inferred = _infer_missing_fields(parsed_document.raw_text, extracted)
-        if inferred:
-            extracted.update(inferred)
-            trace.append(f"Inferred additional fields from semantic heuristics: {', '.join(sorted(inferred))}.")
-        else:
-            trace.append("No additional missing fields could be inferred.")
-
+        _fill_rule_based_gaps(extracted, spatial_fields, trace)
+        _apply_field_inference(extracted, parsed_document.raw_text, trace)
         return extracted, trace
 
     @property
@@ -650,24 +805,13 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
     def extract_with_trace(self, parsed_document: ParsedDocument) -> tuple[dict[str, Any], list[str]]:
         trace: list[str] = []
         lines = parsed_document.sections
-        signature = TemplateMemory.build_signature(lines)
+        spatial_fields, spatial_layouts = _collect_spatial_data(parsed_document, trace)
+        signature = TemplateMemory.build_signature(lines, layouts=spatial_layouts)
         trace.append("Generated document signature from top lines and keywords.")
 
-        # Spatial extraction from PDF (lazy — only if pdfplumber available)
-        spatial_fields: dict[str, Any] = {}
-        spatial_layouts = []
-        if parsed_document.file_path and parsed_document.file_path.suffix.lower() == ".pdf":
-            try:
-                from .spatial_extractor import extract_spatial_layout, extract_fields_from_layout
-                spatial_layouts = extract_spatial_layout(parsed_document.file_path)
-                if spatial_layouts:
-                    spatial_fields = extract_fields_from_layout(spatial_layouts)
-                    if spatial_fields:
-                        trace.append(f"Spatial PDF extraction found {len(spatial_fields)} field(s) by page position.")
-            except Exception:
-                pass
-
-        template_match = self._template_memory.find_best_match(signature)
+        doc_type = detect_document_type(parsed_document.raw_text)
+        trace.append(f"Detected document type: {doc_type}.")
+        template_match = self._template_memory.find_best_match(signature, document_type=doc_type)
         if template_match:
             trace.append(
                 f"Best learned template candidate was `{template_match.template.get('template_name', 'unknown')}` "
@@ -676,54 +820,67 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
         else:
             trace.append("No learned template candidates were available yet.")
 
-        doc_type = detect_document_type(parsed_document.raw_text)
-        trace.append(f"Detected document type: {doc_type}.")
-
-        # For familiar layouts, keep the faster local path.
         if template_match and template_match.score >= 0.68:
-            extracted = _empty_schema(parsed_document.file_name, doc_type)
-            extracted.update(_extract_from_template(template_match.template, parsed_document.raw_text))
-            # Spatial anchor extraction for matched templates
-            if spatial_layouts and template_match.template.get("spatial_anchors"):
-                try:
-                    from .spatial_extractor import extract_by_spatial_anchors
-                    anchor_fields = extract_by_spatial_anchors(spatial_layouts, template_match.template["spatial_anchors"])
-                    if anchor_fields:
-                        extracted.update(anchor_fields)
-                        trace.append(f"Spatial template anchors matched {len(anchor_fields)} field(s) at expected page positions.")
-                except Exception:
-                    pass
-            trace.append("Used learned template anchors because the document format looked familiar enough.")
-            # Fill gaps from general spatial extraction before deciding on LLM
-            for f, v in spatial_fields.items():
-                if extracted.get(f) in (None, "", []) and v:
-                    extracted[f] = v
+            # Rule-based baseline first; template anchors and spatial anchors fill remaining gaps.
+            extracted = self._adaptive_local._rule_based.extract(parsed_document)
+            _fill_rule_based_gaps(
+                extracted,
+                _extract_from_template(template_match.template, parsed_document.raw_text),
+                trace,
+                source="Template text anchors",
+            )
+            _apply_spatial_anchors(extracted, spatial_layouts, template_match, trace)
+            _filled = sorted(
+                k for k, v in extracted.items()
+                if k not in ("document_type", "source_file") and v not in (None, "", [])
+            )
+            trace.append(
+                f"Used learned template anchors because the document format looked familiar enough. "
+                f"Fields with values at this stage: {', '.join(_filled) or 'none'}."
+            )
+            _fill_rule_based_gaps(extracted, spatial_fields, trace)
             if _needs_llm_fallback(extracted):
-                trace.append("Template extraction was too incomplete, so the pipeline fell back to the LLM.")
+                from .schema_config import get_required_fields
+                _missing = sorted(
+                    f for f in get_required_fields(extracted.get("document_type", "invoice"))
+                    if extracted.get(f) in (None, "", [])
+                )
+                trace.append(
+                    f"Template extraction was too incomplete, so the pipeline fell back to the LLM. "
+                    f"Missing required field(s): {', '.join(_missing) or 'none'}."
+                )
                 if not self._settings.openai_api_key:
                     trace.append("No API key was available for LLM fallback, so incomplete template output was kept.")
                 else:
-                    extracted = self._extract_with_llm(parsed_document, doc_type)
-                    trace.append("Used the LLM reasoning layer after incomplete template extraction.")
+                    _prior = {k: v for k, v in extracted.items() if v not in (None, "", [], {})}
+                    _llm_result = self._extract_with_llm(parsed_document, doc_type)
+                    _llm_filled = sorted(
+                        k for k, v in _llm_result.items()
+                        if k not in ("document_type", "source_file") and v not in (None, "", [])
+                    )
+                    trace.append(
+                        f"Used the LLM reasoning layer after incomplete template extraction. "
+                        f"Fields extracted: {', '.join(_llm_filled) or 'none'}."
+                    )
+                    _merge_llm_result(extracted, _llm_result, _prior, trace)
         else:
             if not self._settings.openai_api_key:
                 trace.append("OPENAI_API_KEY not set, so the pipeline fell back to adaptive local extraction.")
                 return self._adaptive_local.extract_with_trace(parsed_document)
+            _prior = {k: v for k, v in spatial_fields.items() if v not in (None, "", [], {})}
+            _llm_result = self._extract_with_llm(parsed_document, doc_type)
+            _llm_filled = sorted(
+                k for k, v in _llm_result.items()
+                if k not in ("document_type", "source_file") and v not in (None, "", [])
+            )
+            trace.append(
+                f"Used the LLM reasoning layer for an unseen or weakly matched document format. "
+                f"Fields extracted: {', '.join(_llm_filled) or 'none'}."
+            )
+            extracted = _empty_schema(parsed_document.file_name, doc_type)
+            _merge_llm_result(extracted, _llm_result, _prior, trace)
 
-            extracted = self._extract_with_llm(parsed_document, doc_type)
-            trace.append("Used the LLM reasoning layer for an unseen or weakly matched document format.")
-            # Fill any gaps the LLM missed with spatial fields
-            for f, v in spatial_fields.items():
-                if extracted.get(f) in (None, "", []) and v:
-                    extracted[f] = v
-
-        inferred = _infer_missing_fields(parsed_document.raw_text, extracted)
-        if inferred:
-            extracted.update(inferred)
-            trace.append(f"Inferred additional fields from semantic heuristics: {', '.join(sorted(inferred))}.")
-        else:
-            trace.append("No additional missing fields could be inferred.")
-
+        _apply_field_inference(extracted, parsed_document.raw_text, trace)
         return extracted, trace
 
     def _extract_with_llm(self, parsed_document: ParsedDocument, doc_type: str = "invoice") -> dict[str, Any]:
@@ -791,11 +948,15 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
                 "Extract invoice fields from the document text and return one JSON object only. "
                 "Use exactly these keys and no others: "
                 "document_type, source_file, vendor_name, invoice_number, invoice_date, due_date, "
+                "bill_to, po_number, payment_terms, "
                 "subtotal, tax, shipping_handling, total_amount, currency, line_items. "
                 "Use null for missing scalar values and [] for missing line_items. "
                 "Set document_type to invoice unless the text clearly shows otherwise. "
                 "Dates should be normalized to YYYY-MM-DD when possible. "
                 "Monetary values should be numbers, not strings with currency symbols. "
+                "bill_to is the customer or billed-to party name. "
+                "po_number is the purchase order number if present, otherwise null. "
+                "payment_terms is the payment terms (e.g. Net 30, Due on Receipt), otherwise null. "
                 "shipping_handling is the shipping and/or handling charge if present, otherwise null. "
                 "line_items must be a JSON array of objects, each with keys: "
                 "description (string), quantity (number), unit_price (number), total (number). "
@@ -818,45 +979,42 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
             raise ExtractionError(f"LLM response was not valid JSON: {content}") from exc
 
         extracted = _empty_schema(parsed_document.file_name, doc_type)
-        extracted.update(data)
-        extracted["document_type"] = extracted.get("document_type") or doc_type
+        allowed_keys = set(extracted.keys())
+        extracted.update({k: v for k, v in data.items() if k in allowed_keys})
+        extracted["document_type"] = doc_type
         extracted["source_file"] = parsed_document.file_name
 
+        _LIST_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
+            "invoice": ("line_items",),
+            "medical_discharge": ("secondary_diagnoses", "medications"),
+            "lab_report": ("lab_panels", "abnormal_results"),
+            "business_doc": ("kpis", "recommendations"),
+        }
         if doc_type == "invoice":
             _coerce_money_fields(extracted)
-            if not isinstance(extracted.get("line_items"), list):
-                extracted["line_items"] = []
-        elif doc_type == "medical_discharge":
-            for list_field in ("secondary_diagnoses", "medications"):
-                if not isinstance(extracted.get(list_field), list):
-                    extracted[list_field] = []
-        elif doc_type == "lab_report":
-            for list_field in ("lab_panels", "abnormal_results"):
-                if not isinstance(extracted.get(list_field), list):
-                    extracted[list_field] = []
-        elif doc_type == "business_doc":
-            for list_field in ("kpis", "recommendations"):
-                if not isinstance(extracted.get(list_field), list):
-                    extracted[list_field] = []
+        for list_field in _LIST_FIELDS_BY_TYPE.get(doc_type, ()):
+            if not isinstance(extracted.get(list_field), list):
+                extracted[list_field] = []
 
         return extracted
 
     def _request_llm_json(self, client, messages: list[dict[str, str]]) -> str:
-        request = {
+        provider = (self._settings.llm_provider or "openai").strip().lower()
+
+        # Ollama and OpenRouter route to many different backends; some don't support
+        # json_object mode.  All other supported providers (openai, groq, gemini) do.
+        supports_json_mode = provider not in ("ollama", "openrouter")
+
+        request: dict[str, Any] = {
             "model": self._settings.openai_model,
             "messages": messages,
             "temperature": 0,
-            "response_format": {"type": "json_object"},
         }
+        if supports_json_mode:
+            request["response_format"] = {"type": "json_object"}
+
         try:
             response = client.chat.completions.create(**request)
-        except TypeError:
-            request.pop("response_format", None)
-            try:
-                response = client.chat.completions.create(**request)
-            except TypeError:
-                request.pop("temperature", None)
-                response = client.chat.completions.create(**request)
         except Exception as exc:
             retry_after = _parse_retry_after(exc)
             if retry_after is not None:
@@ -923,6 +1081,9 @@ def _empty_invoice(source_file: str) -> dict[str, Any]:
         "invoice_number": None,
         "invoice_date": None,
         "due_date": None,
+        "bill_to": None,
+        "po_number": None,
+        "payment_terms": None,
         "subtotal": None,
         "tax": None,
         "shipping_handling": None,
@@ -1033,15 +1194,20 @@ def _extract_from_template(template: dict[str, Any], raw_text: str) -> dict[str,
         value = match.groupdict().get("value") or match.group(0)
         extracted[field] = value.strip()
 
-    _coerce_money_fields(extracted)
-    if not extracted.get("line_items"):
-        extracted["line_items"] = _extract_line_items(raw_text)
+    if template.get("document_type", "invoice") == "invoice":
+        _coerce_money_fields(extracted)
+        if not extracted.get("line_items"):
+            extracted["line_items"] = _extract_line_items(raw_text)
 
     return extracted
 
 
 def _infer_missing_fields(raw_text: str, extracted: dict[str, Any]) -> dict[str, Any]:
     inferred: dict[str, Any] = {}
+    doc_type = extracted.get("document_type", "invoice")
+
+    if doc_type != "invoice":
+        return inferred
 
     if extracted.get("currency") in (None, ""):
         if "$" in raw_text:
@@ -1070,9 +1236,10 @@ def _infer_missing_fields(raw_text: str, extracted: dict[str, Any]) -> dict[str,
 
 
 def _needs_llm_fallback(extracted: dict[str, Any]) -> bool:
-    required_fields = ("vendor_name", "invoice_number", "invoice_date", "total_amount")
-    missing_required = sum(1 for field in required_fields if extracted.get(field) in (None, "", []))
-    return missing_required >= 1
+    from .schema_config import get_required_fields
+    doc_type = extracted.get("document_type", "invoice")
+    required = get_required_fields(doc_type) or {"vendor_name", "total_amount"}
+    return any(extracted.get(f) in (None, "", []) for f in required)
 
 
 _MONEY_FIELDS = ("subtotal", "tax", "shipping_handling", "total_amount")
