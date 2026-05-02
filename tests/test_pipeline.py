@@ -902,6 +902,27 @@ def _fixture_pdfs():
     return list(FIXTURES.glob("*.pdf")) + list(FIXTURES.glob("*.txt"))
 
 
+# ---------------------------------------------------------------------------
+# Truth-data loader — used by TestFixtureGroundTruth and TestFixtureMissingData
+# ---------------------------------------------------------------------------
+
+_TRUTH_DATA: dict[str, dict] = {}
+_TRUTH_DIR = FIXTURES / "truth_data"
+if _TRUTH_DIR.exists():
+    import json as _json
+    for _f in sorted(_TRUTH_DIR.glob("*_truth.json")):
+        _TRUTH_DATA.update(_json.loads(_f.read_text()))
+
+
+def _truth_params():
+    """Return pytest.param entries for every fixture that has truth data."""
+    return [
+        pytest.param(FIXTURES / name, expected, id=name)
+        for name, expected in _TRUTH_DATA.items()
+        if (FIXTURES / name).exists()
+    ]
+
+
 @pytest.mark.parametrize("fixture_path", _fixture_pdfs(), ids=lambda p: p.name)
 def test_fixture_file_extracts_without_error(fixture_path, tmp_path):
     """Every file in tests/fixtures/ must process without a pipeline crash."""
@@ -927,6 +948,45 @@ def test_fixture_file_no_crash_on_duplicate(fixture_path, tmp_path):
     copy_name = f"copy_of_{fixture_path.name}"
     r2 = pipeline.process_bytes(copy_name, file_bytes)
     assert r2.summary.get("duplicate") is True
+
+
+# ---------------------------------------------------------------------------
+# Ground-truth assertions — document type and field presence
+# ---------------------------------------------------------------------------
+
+class TestFixtureGroundTruth:
+    """Each 'full' and 'similar' fixture must extract the correct document_type
+    and produce non-None values for every field that truth data marks non-null."""
+
+    @pytest.mark.parametrize("fixture_path,expected", _truth_params())
+    def test_document_type_identified_correctly(self, fixture_path, expected, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        pipeline = _make_pipeline(tmp_path)
+        result = pipeline.process_bytes(fixture_path.name, fixture_path.read_bytes())
+        assert not result.summary.get("duplicate"), "Fixture should not be a duplicate on first run"
+        assert result.extracted_data.get("document_type") == expected["document_type"], (
+            f"{fixture_path.name}: expected document_type={expected['document_type']!r}, "
+            f"got {result.extracted_data.get('document_type')!r}"
+        )
+
+    @pytest.mark.parametrize("fixture_path,expected", _truth_params())
+    def test_non_null_truth_fields_are_extracted(self, fixture_path, expected, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        pipeline = _make_pipeline(tmp_path)
+        result = pipeline.process_bytes(fixture_path.name, fixture_path.read_bytes())
+        extracted = result.extracted_data
+        missing = [
+            field for field, val in expected.items()
+            if field != "document_type"
+            and val is not None
+            and extracted.get(field) in (None, "", [], {})
+        ]
+        assert missing == [], (
+            f"{fixture_path.name}: fields in truth data but not extracted: {missing}\n"
+            f"Trace: {result.extraction_trace}"
+        )
 
 
 # ---------------------------------------------------------------------------
