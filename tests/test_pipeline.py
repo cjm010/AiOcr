@@ -1079,6 +1079,8 @@ class TestFixtureDuplicateDetection:
     def test_dup_detected_after_original_processed(self, original, dup, tmp_path):
         if not _PDF_LIBS_AVAILABLE:
             pytest.skip("PDF libraries not installed")
+        if "no_text" in original.name and not _TESSERACT_AVAILABLE:
+            pytest.skip("Tesseract not installed — cannot process image-only PDFs")
         pipeline = _make_pipeline(tmp_path)
         r1 = pipeline.process_bytes(original.name, original.read_bytes())
         assert not r1.summary.get("duplicate"), "Original should not be flagged as duplicate"
@@ -1092,6 +1094,8 @@ class TestFixtureDuplicateDetection:
     def test_dup_alone_is_not_flagged_as_duplicate(self, original, dup, tmp_path):
         if not _PDF_LIBS_AVAILABLE:
             pytest.skip("PDF libraries not installed")
+        if "no_text" in original.name and not _TESSERACT_AVAILABLE:
+            pytest.skip("Tesseract not installed — cannot process image-only PDFs")
         pipeline = _make_pipeline(tmp_path)
         result = pipeline.process_bytes(dup.name, dup.read_bytes())
         assert not result.summary.get("duplicate"), (
