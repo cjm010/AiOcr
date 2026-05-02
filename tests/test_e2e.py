@@ -12,7 +12,9 @@ Run:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -39,7 +41,7 @@ def streamlit_url(tmp_path_factory):
     }
     proc = subprocess.Popen(
         [
-            "python", "-m", "streamlit", "run", APP_PATH,
+            sys.executable, "-m", "streamlit", "run", APP_PATH,
             "--server.port", "8502",
             "--server.headless", "true",
             "--server.runOnSave", "false",
@@ -77,7 +79,7 @@ class TestE2EUploadFlow:
         upload_input = page.locator("input[type=file]").first
         upload_input.set_input_files(str(fixture))
         page.wait_for_timeout(1000)
-        process_btn = page.get_by_role("button", name_re=r"[Pp]rocess")
+        process_btn = page.get_by_role("button", name=re.compile(r"[Pp]rocess"))
         if process_btn.count() > 0:
             process_btn.first.click()
             page.wait_for_load_state("networkidle")
@@ -96,7 +98,7 @@ class TestE2EUploadFlow:
         upload_input = page.locator("input[type=file]").first
         upload_input.set_input_files(str(fixture))
         page.wait_for_timeout(500)
-        process_btn = page.get_by_role("button", name_re=r"[Pp]rocess")
+        process_btn = page.get_by_role("button", name=re.compile(r"[Pp]rocess"))
         if process_btn.count() > 0:
             process_btn.first.click()
             page.wait_for_load_state("networkidle")
@@ -120,7 +122,7 @@ class TestE2EUploadFlow:
             pytest.skip(f"Missing fixtures: {missing}")
         page.goto(streamlit_url)
         page.wait_for_load_state("networkidle")
-        bulk_tab = page.get_by_role("tab", name_re=r"[Bb]ulk")
+        bulk_tab = page.get_by_role("tab", name=re.compile(r"[Bb]ulk"))
         if bulk_tab.count() > 0:
             bulk_tab.first.click()
             page.wait_for_timeout(500)
@@ -129,7 +131,7 @@ class TestE2EUploadFlow:
             upload_input = page.locator("input[type=file]").nth(1)
         upload_input.set_input_files([str(p) for p in pdfs])
         page.wait_for_timeout(500)
-        process_btn = page.get_by_role("button", name_re=r"[Pp]rocess")
+        process_btn = page.get_by_role("button", name=re.compile(r"[Pp]rocess"))
         if process_btn.count() > 0:
             process_btn.first.click()
             page.wait_for_load_state("networkidle")
