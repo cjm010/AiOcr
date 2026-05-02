@@ -240,18 +240,18 @@ class TestSingleFileTab:
         assert not uploader.accept_multiple_files
 
     def test_upload_invoice_pdf_no_exception(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
         assert not at.exception
 
     def test_upload_and_process_invoice(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -264,9 +264,9 @@ class TestSingleFileTab:
         assert any(kw in text for kw in ("invoice", "vendor", "extracted", "validation"))
 
     def test_upload_and_process_medical_discharge(self, tmp_path):
-        pdf = _pdf("healthcare_discharge_001.pdf")
+        pdf = _pdf("medical_discharge_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("healthcare_discharge_001.pdf not in fixtures")
+            pytest.skip("medical_discharge_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -279,9 +279,9 @@ class TestSingleFileTab:
         assert any(kw in text for kw in ("discharge", "patient", "medical", "diagnosis", "extracted"))
 
     def test_upload_and_process_lab_report(self, tmp_path):
-        pdf = _pdf("healthcare_lab_001.pdf")
+        pdf = _pdf("lab_report_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("healthcare_lab_001.pdf not in fixtures")
+            pytest.skip("lab_report_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -294,9 +294,9 @@ class TestSingleFileTab:
         assert any(kw in text for kw in ("lab", "patient", "report", "extracted"))
 
     def test_upload_and_process_nda(self, tmp_path):
-        pdf = _pdf("legal_nda_001.pdf")
+        pdf = _pdf("nda_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("legal_nda_001.pdf not in fixtures")
+            pytest.skip("nda_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -309,9 +309,9 @@ class TestSingleFileTab:
         assert any(kw in text for kw in ("nda", "disclosure", "party", "agreement", "extracted"))
 
     def test_upload_and_process_business_doc(self, tmp_path):
-        pdf = _pdf("business_doc_001.pdf")
+        pdf = _pdf("business_doc_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("business_doc_001.pdf not in fixtures")
+            pytest.skip("business_doc_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -324,9 +324,9 @@ class TestSingleFileTab:
         assert any(kw in text for kw in ("business", "company", "report", "extracted"))
 
     def test_process_shows_validation_results(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -339,9 +339,9 @@ class TestSingleFileTab:
         assert any(kw in text for kw in ("pass", "fail", "warn", "validation", "check"))
 
     def test_process_shows_extraction_trace(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -367,9 +367,9 @@ class TestSingleFileTab:
         assert not at.exception
 
     def test_upload_same_file_twice_no_exception(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         tup = _upload(pdf)
@@ -379,9 +379,9 @@ class TestSingleFileTab:
         assert not at.exception
 
     def test_process_produces_json_output_element(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _single_uploader(at).set_value(_upload(pdf)).run()
@@ -407,18 +407,18 @@ class TestBulkUploadTab:
         assert uploader.accept_multiple_files
 
     def test_bulk_upload_single_pdf_no_exception(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _bulk_uploader(at).set_value([_upload(pdf)]).run()
         assert not at.exception
 
     def test_bulk_upload_shows_process_button(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _bulk_uploader(at).set_value([_upload(pdf)]).run()
@@ -427,9 +427,9 @@ class TestBulkUploadTab:
         assert any("process" in l for l in labels)
 
     def test_bulk_upload_shows_clear_button(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _bulk_uploader(at).set_value([_upload(pdf)]).run()
@@ -437,9 +437,9 @@ class TestBulkUploadTab:
         assert any("clear" in l for l in labels)
 
     def test_bulk_process_two_invoices(self, tmp_path):
-        pdfs = [_pdf("invoice_001.pdf"), _pdf("invoice_002.pdf")]
+        pdfs = [_pdf("invoice_format_a_full.pdf"), _pdf("invoice_format_b_full.pdf")]
         if not all(p.exists() for p in pdfs):
-            pytest.skip("invoice_001/002.pdf not in fixtures")
+            pytest.skip("invoice_format_a/b_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _bulk_uploader(at).set_value([_upload(p) for p in pdfs]).run()
@@ -450,9 +450,9 @@ class TestBulkUploadTab:
 
     def test_bulk_process_mixed_document_types(self, tmp_path):
         pdfs = [
-            _pdf("invoice_001.pdf"),
-            _pdf("healthcare_lab_001.pdf"),
-            _pdf("business_doc_001.pdf"),
+            _pdf("invoice_format_a_full.pdf"),
+            _pdf("lab_report_format_a_full.pdf"),
+            _pdf("business_doc_format_a_full.pdf"),
         ]
         missing = [p.name for p in pdfs if not p.exists()]
         if missing:
@@ -466,9 +466,9 @@ class TestBulkUploadTab:
         assert not at.exception
 
     def test_bulk_process_shows_summary_table(self, tmp_path):
-        pdfs = [_pdf("invoice_001.pdf"), _pdf("invoice_002.pdf")]
+        pdfs = [_pdf("invoice_format_a_full.pdf"), _pdf("invoice_format_b_full.pdf")]
         if not all(p.exists() for p in pdfs):
-            pytest.skip("invoice_001/002.pdf not in fixtures")
+            pytest.skip("invoice_format_a/b_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _bulk_uploader(at).set_value([_upload(p) for p in pdfs]).run()
@@ -479,9 +479,9 @@ class TestBulkUploadTab:
         assert len(at.dataframe) > 0 or len(at.metric) > 0
 
     def test_bulk_process_shows_file_count_metric(self, tmp_path):
-        pdfs = [_pdf("invoice_001.pdf"), _pdf("invoice_002.pdf")]
+        pdfs = [_pdf("invoice_format_a_full.pdf"), _pdf("invoice_format_b_full.pdf")]
         if not all(p.exists() for p in pdfs):
-            pytest.skip("invoice_001/002.pdf not in fixtures")
+            pytest.skip("invoice_format_a/b_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _bulk_uploader(at).set_value([_upload(p) for p in pdfs]).run()
@@ -494,9 +494,9 @@ class TestBulkUploadTab:
         assert all_elements > 0
 
     def test_bulk_duplicate_in_same_batch_no_crash(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         original = _upload(pdf)
@@ -508,9 +508,9 @@ class TestBulkUploadTab:
         assert not at.exception
 
     def test_bulk_clear_button_no_crash(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         _bulk_uploader(at).set_value([_upload(pdf)]).run()
@@ -521,7 +521,13 @@ class TestBulkUploadTab:
         assert not at.exception
 
     def test_bulk_five_pdfs_processes_without_crash(self, tmp_path):
-        pdfs = [_pdf(f"invoice_00{i}.pdf") for i in range(1, 6)]
+        pdfs = [
+            _pdf("invoice_format_a_full.pdf"),
+            _pdf("invoice_format_b_full.pdf"),
+            _pdf("invoice_format_a_similar.pdf"),
+            _pdf("invoice_format_a_missing.pdf"),
+            _pdf("invoice_format_b_missing.pdf"),
+        ]
         available = [p for p in pdfs if p.exists()]
         if len(available) < 3:
             pytest.skip("Need at least 3 invoice PDFs")
@@ -618,9 +624,9 @@ class TestExtractionModes:
         return at
 
     def test_rule_based_mode_processes_invoice(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         self._switch_mode(at, "rule-based")
@@ -631,9 +637,9 @@ class TestExtractionModes:
         assert not at.exception
 
     def test_adaptive_local_mode_processes_invoice(self, tmp_path):
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         at = _app(tmp_path)
         at.run()
         self._switch_mode(at, "adaptive-local")
@@ -739,9 +745,9 @@ class TestReviewFormConfidenceBadges:
 
     def test_single_file_review_form_shows_confidence_text(self, tmp_path):
         """After processing a file that needs review, the form labels show confidence."""
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         if not _PDF_LIBS_AVAILABLE:
             pytest.skip("PDF parsing libraries not installed in this environment")
         at = _app(tmp_path)
@@ -760,9 +766,9 @@ class TestReviewFormConfidenceBadges:
 
     def test_review_form_shows_source_badge_for_extracted_field(self, tmp_path):
         """Extracted fields should carry a source-method badge in their label."""
-        pdf = _pdf("invoice_001.pdf")
+        pdf = _pdf("invoice_format_a_full.pdf")
         if not pdf.exists():
-            pytest.skip("invoice_001.pdf not in fixtures")
+            pytest.skip("invoice_format_a_full.pdf not in fixtures")
         if not _PDF_LIBS_AVAILABLE:
             pytest.skip("PDF parsing libraries not installed in this environment")
         at = _app(tmp_path)
@@ -780,9 +786,9 @@ class TestReviewFormConfidenceBadges:
 
     def test_review_form_shows_red_for_missing_field(self, tmp_path):
         """A field that could not be extracted should get a red 'not extracted' badge."""
-        pdf = _pdf("healthcare_discharge_001.pdf")
+        pdf = _pdf("medical_discharge_format_a_missing.pdf")
         if not pdf.exists():
-            pytest.skip("healthcare_discharge_001.pdf not in fixtures")
+            pytest.skip("medical_discharge_format_a_missing.pdf not in fixtures")
         if not _PDF_LIBS_AVAILABLE:
             pytest.skip("PDF parsing libraries not installed in this environment")
         at = _app(tmp_path)
@@ -799,9 +805,9 @@ class TestReviewFormConfidenceBadges:
 
     def test_bulk_review_form_shows_confidence_badges(self, tmp_path):
         """Confidence badges must appear in the bulk-upload review form too."""
-        pdfs = [_pdf("invoice_001.pdf"), _pdf("invoice_002.pdf")]
+        pdfs = [_pdf("invoice_format_a_full.pdf"), _pdf("invoice_format_b_full.pdf")]
         if not all(p.exists() for p in pdfs):
-            pytest.skip("invoice_001/002.pdf not in fixtures")
+            pytest.skip("invoice_format_a/b_full.pdf not in fixtures")
         if not _PDF_LIBS_AVAILABLE:
             pytest.skip("PDF parsing libraries not installed in this environment")
         at = _app(tmp_path)

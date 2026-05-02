@@ -1361,12 +1361,12 @@ class TestSpatialExtractor:
 class TestSpatialExtractionFromFixturePDF:
     """Integration tests using a real fixture PDF — skipped if pdfplumber absent."""
 
-    FIXTURE = FIXTURES / "invoice_001.pdf"
+    FIXTURE = FIXTURES / "invoice_format_a_full.pdf"
 
     def test_extract_spatial_layout_returns_data_for_pdf(self):
         pytest.importorskip("pdfplumber")
         if not self.FIXTURE.exists():
-            pytest.skip("invoice_001.pdf fixture not present")
+            pytest.skip("invoice_format_a_full.pdf fixture not present")
         from src.doc_ai.spatial_extractor import extract_spatial_layout
         layouts = extract_spatial_layout(self.FIXTURE)
         assert isinstance(layouts, list)
@@ -1377,7 +1377,7 @@ class TestSpatialExtractionFromFixturePDF:
     def test_extract_fields_from_pdf_fixture_gets_some_fields(self):
         pytest.importorskip("pdfplumber")
         if not self.FIXTURE.exists():
-            pytest.skip("invoice_001.pdf fixture not present")
+            pytest.skip("invoice_format_a_full.pdf fixture not present")
         from src.doc_ai.spatial_extractor import extract_spatial_layout, extract_fields_from_layout
         layouts = extract_spatial_layout(self.FIXTURE)
         fields = extract_fields_from_layout(layouts)
