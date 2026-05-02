@@ -288,3 +288,78 @@ class TestLlmUsageDaily:
                 llm_usage_daily(conn, days=0)
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Integration test — real pipeline output → metrics
+# ---------------------------------------------------------------------------
+
+_FIXTURES_PATH = Path(__file__).parent / "fixtures"
+_FORMAT_A_FULL = [
+    _FIXTURES_PATH / f"{doc_type}_format_a_full.pdf"
+    for doc_type in ("invoice", "medical_discharge", "nda", "lab_report", "business_doc")
+]
+_PDF_LIBS_AVAILABLE = any(
+    __import__("importlib").util.find_spec(lib) is not None
+    for lib in ("pypdf", "pdfplumber", "unstructured")
+)
+
+
+class TestMetricsWithRealFixtures:
+    """Process one format_a_full fixture per doc type, then assert metric counts."""
+
+    def _make_pipeline(self, tmp_path):
+        import os
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.pipeline import DocumentPipeline
+
+        get_settings.cache_clear()
+        os.environ["APP_ENV"] = "test"
+        os.environ["APP_DATA_ROOT"] = str(tmp_path)
+        get_settings.cache_clear()
+        return DocumentPipeline(get_settings())
+
+    def test_total_documents_processed_matches_fixture_count(self, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        available = [f for f in _FORMAT_A_FULL if f.exists()]
+        if not available:
+            pytest.skip("No format_a_full fixtures found")
+
+        pipeline = self._make_pipeline(tmp_path)
+        for fixture in available:
+            pipeline.process_bytes(fixture.name, fixture.read_bytes())
+
+        from src.doc_ai.config import get_settings
+        db_path = get_settings().database_path
+        assert db_path.exists(), f"Database was not created at {db_path}"
+        conn = sqlite3.connect(str(db_path))
+        try:
+            count = total_documents_processed(conn)
+        finally:
+            conn.close()
+        assert count == len(available), (
+            f"Expected {len(available)} processed documents, got {count}"
+        )
+
+    def test_records_created_matches_fixture_count(self, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        available = [f for f in _FORMAT_A_FULL if f.exists()]
+        if not available:
+            pytest.skip("No format_a_full fixtures found")
+
+        pipeline = self._make_pipeline(tmp_path)
+        for fixture in available:
+            pipeline.process_bytes(fixture.name, fixture.read_bytes())
+
+        from src.doc_ai.config import get_settings
+        db_path = get_settings().database_path
+        conn = sqlite3.connect(str(db_path))
+        try:
+            count = records_created(conn)
+        finally:
+            conn.close()
+        assert count == len(available), (
+            f"Expected {len(available)} per-type records, got {count}"
+        )
