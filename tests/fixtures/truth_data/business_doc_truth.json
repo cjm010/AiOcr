@@ -1,0 +1,63 @@
+{
+  "business_doc_format_a_full.pdf": {
+    "document_type": "Internal Memorandum",
+    "company_name": "Cascade Dynamics Corporation",
+    "document_title": "Q2 Budget Reallocation Memo",
+    "document_date": "2024-04-15",
+    "author": "Victor Chen, CFO",
+    "recipients": [
+      "Sarah Mitchell, VP Operations",
+      "James Kowalski, VP Engineering",
+      "Lena Park, VP Sales"
+    ],
+    "subject": "Budget Reallocation for Q2 Infrastructure Upgrades",
+    "summary": "This memorandum authorizes the reallocation of $450,000 from the marketing reserve to fund critical infrastructure upgrades in Q2, including server capacity expansion and cybersecurity enhancements. All affected department heads are requested to submit revised budget projections by April 30."
+  },
+  "business_doc_format_a_similar.pdf": {
+    "document_type": "Internal Memorandum",
+    "company_name": "Cascade Dynamics Corporation",
+    "document_title": "Q3 Hiring Freeze Directive",
+    "document_date": "2024-07-01",
+    "author": "Victor Chen, CFO",
+    "recipients": [
+      "Sarah Mitchell, VP Operations",
+      "All Department Heads"
+    ],
+    "subject": "Temporary Hiring Freeze - Q3 Fiscal Review",
+    "summary": "Effective immediately, all non-critical hiring activities are suspended pending completion of the Q3 fiscal review. Exceptions must be submitted to the CFO office with written justification. The freeze is expected to lift by August 15 upon board approval of the revised headcount plan."
+  },
+  "business_doc_format_a_missing.pdf": {
+    "document_type": "Internal Memorandum",
+    "company_name": "Cascade Dynamics Corporation",
+    "document_title": "Remote Work Policy Update",
+    "document_date": null,
+    "author": null,
+    "recipients": null,
+    "subject": "Updated Remote Work Guidelines for Hybrid Employees",
+    "summary": "This document outlines revised guidelines for employees participating in the hybrid work program, including updated expectations for in-office attendance, equipment reimbursement procedures, and communication protocols."
+  },
+  "business_doc_format_b_full.pdf": {
+    "document_type": "Executive Report",
+    "company_name": "Pinnacle Financial Group",
+    "document_title": "Annual Cybersecurity Risk Assessment",
+    "document_date": "2024-03-20",
+    "author": "Linda Okafor, CISO",
+    "recipients": [
+      "Board of Directors",
+      "Risk Management Committee",
+      "IT Steering Committee"
+    ],
+    "subject": "FY2024 Cybersecurity Posture and Risk Mitigation Strategy",
+    "summary": "This report presents findings from the FY2024 cybersecurity risk assessment, identifying three critical vulnerabilities in external-facing systems and recommending a $1.2M investment in next-generation endpoint protection and zero-trust network architecture."
+  },
+  "business_doc_format_b_missing.pdf": {
+    "document_type": "Executive Report",
+    "company_name": "Pinnacle Financial Group",
+    "document_title": "Q4 Operational Efficiency Report",
+    "document_date": null,
+    "author": null,
+    "recipients": null,
+    "subject": "Q4 Operational Metrics and Efficiency Benchmarking",
+    "summary": "This report analyzes Q4 operational performance metrics across all business units, highlighting a 12% improvement in processing efficiency and recommending process automation investments for the upcoming fiscal year."
+  }
+}
