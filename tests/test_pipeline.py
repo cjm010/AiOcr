@@ -896,6 +896,17 @@ _PDF_LIBS_AVAILABLE = any(
 )
 
 
+def _tesseract_available() -> bool:
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+        return True
+    except Exception:
+        return False
+
+_TESSERACT_AVAILABLE = _tesseract_available()
+
+
 def _fixture_pdfs():
     if not FIXTURES.exists():
         return []
@@ -1032,6 +1043,178 @@ class TestFixtureMissingData:
         assert wrongly_extracted == [], (
             f"{fixture_path.name}: fields truth marks null but extractor found values for: "
             f"{wrongly_extracted} — check if the PDF truly has those fields blank"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Duplicate detection assertions
+# ---------------------------------------------------------------------------
+
+class TestFixtureDuplicateDetection:
+    """_dup fixtures are exact copies of their originals.
+    Processing original then dup must flag dup as duplicate.
+    Processing dup alone must NOT flag it as duplicate."""
+
+    _DUP_PAIRS = [
+        pytest.param(
+            FIXTURES / f"{doc_type}_format_a_full.pdf",
+            FIXTURES / f"{doc_type}_format_a_full_dup.pdf",
+            id=f"{doc_type}_searchable_dup",
+        )
+        for doc_type in ("invoice", "medical_discharge", "nda", "lab_report", "business_doc")
+        if (FIXTURES / f"{doc_type}_format_a_full.pdf").exists()
+        and (FIXTURES / f"{doc_type}_format_a_full_dup.pdf").exists()
+    ] + [
+        pytest.param(
+            FIXTURES / f"{doc_type}_no_text_full.pdf",
+            FIXTURES / f"{doc_type}_no_text_dup.pdf",
+            id=f"{doc_type}_no_text_dup",
+        )
+        for doc_type in ("invoice", "medical_discharge", "nda", "lab_report", "business_doc")
+        if (FIXTURES / f"{doc_type}_no_text_full.pdf").exists()
+        and (FIXTURES / f"{doc_type}_no_text_dup.pdf").exists()
+    ]
+
+    @pytest.mark.parametrize("original,dup", _DUP_PAIRS)
+    def test_dup_detected_after_original_processed(self, original, dup, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        pipeline = _make_pipeline(tmp_path)
+        r1 = pipeline.process_bytes(original.name, original.read_bytes())
+        assert not r1.summary.get("duplicate"), "Original should not be flagged as duplicate"
+        r2 = pipeline.process_bytes(dup.name, dup.read_bytes())
+        assert r2.summary.get("duplicate") is True, (
+            f"{dup.name}: expected duplicate=True after processing original {original.name}. "
+            f"content_hash original={r1.content_hash!r}"
+        )
+
+    @pytest.mark.parametrize("original,dup", _DUP_PAIRS)
+    def test_dup_alone_is_not_flagged_as_duplicate(self, original, dup, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        pipeline = _make_pipeline(tmp_path)
+        result = pipeline.process_bytes(dup.name, dup.read_bytes())
+        assert not result.summary.get("duplicate"), (
+            f"{dup.name}: should not be flagged as duplicate when processed fresh"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Template matching assertions
+# ---------------------------------------------------------------------------
+
+class TestFixtureTemplateMatching:
+    """Process format_a_full then format_a_similar for the same doc type.
+    The second document must show Template sources (template memory fired)."""
+
+    _TEMPLATE_PAIRS = [
+        pytest.param(
+            FIXTURES / f"{doc_type}_format_a_full.pdf",
+            FIXTURES / f"{doc_type}_format_a_similar.pdf",
+            id=doc_type,
+        )
+        for doc_type in ("invoice", "medical_discharge", "nda", "lab_report", "business_doc")
+        if (FIXTURES / f"{doc_type}_format_a_full.pdf").exists()
+        and (FIXTURES / f"{doc_type}_format_a_similar.pdf").exists()
+    ]
+
+    @pytest.mark.parametrize("first,second", _TEMPLATE_PAIRS)
+    def test_similar_fixture_uses_template_source(self, first, second, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        pipeline = _make_pipeline(tmp_path)
+
+        r1 = pipeline.process_bytes(first.name, first.read_bytes())
+        assert not r1.summary.get("duplicate")
+        assert r1.summary.get("learned_template") is not None, (
+            f"{first.name}: expected a template to be learned after first pass. "
+            f"Trace: {r1.extraction_trace}"
+        )
+
+        r2 = pipeline.process_bytes(second.name, second.read_bytes())
+        assert not r2.summary.get("duplicate")
+        template_sources = [
+            field for field, src in r2.field_sources.items()
+            if src == "Template"
+        ]
+        assert len(template_sources) > 0, (
+            f"{second.name}: expected at least one Template-sourced field after processing "
+            f"{first.name} first. field_sources={r2.field_sources}. "
+            f"Trace: {r2.extraction_trace}"
+        )
+
+    @pytest.mark.parametrize("first,second", _TEMPLATE_PAIRS)
+    def test_template_hit_boosts_confidence(self, first, second, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        pipeline = _make_pipeline(tmp_path)
+        pipeline.process_bytes(first.name, first.read_bytes())
+        r2 = pipeline.process_bytes(second.name, second.read_bytes())
+
+        template_fields = [f for f, s in r2.field_sources.items() if s == "Template"]
+        if not template_fields:
+            pytest.skip("No template fields found — template matching did not fire")
+
+        for field in template_fields:
+            conf = r2.field_confidence.get(field, 0.0)
+            assert conf >= 0.82, (
+                f"{field}: Template-sourced field has confidence {conf:.3f} < 0.82 baseline"
+            )
+
+
+# ---------------------------------------------------------------------------
+# OCR path assertions
+# ---------------------------------------------------------------------------
+
+class TestFixtureOCR:
+    """No-text fixtures must be processed via the OCR fallback path.
+    Parsed text must be non-empty and a document type must be assigned."""
+
+    _NO_TEXT_FIXTURES = [
+        pytest.param(FIXTURES / f"{doc_type}_no_text_full.pdf", doc_type, id=f"{doc_type}_no_text")
+        for doc_type in ("invoice", "medical_discharge", "nda", "lab_report", "business_doc")
+        if (FIXTURES / f"{doc_type}_no_text_full.pdf").exists()
+    ]
+
+    @pytest.mark.parametrize("fixture_path,expected_type", _NO_TEXT_FIXTURES)
+    def test_no_text_pdf_produces_nonempty_parsed_text(self, fixture_path, expected_type, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        if not _TESSERACT_AVAILABLE:
+            pytest.skip("Tesseract binary not installed — OCR unavailable")
+        pipeline = _make_pipeline(tmp_path)
+        result = pipeline.process_bytes(fixture_path.name, fixture_path.read_bytes())
+        assert result.parsed_text.strip() != "", (
+            f"{fixture_path.name}: OCR produced no text. "
+            f"Errors: {result.errors}"
+        )
+
+    @pytest.mark.parametrize("fixture_path,expected_type", _NO_TEXT_FIXTURES)
+    def test_no_text_pdf_document_type_identified(self, fixture_path, expected_type, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        if not _TESSERACT_AVAILABLE:
+            pytest.skip("Tesseract binary not installed — OCR unavailable")
+        pipeline = _make_pipeline(tmp_path)
+        result = pipeline.process_bytes(fixture_path.name, fixture_path.read_bytes())
+        doc_type = result.extracted_data.get("document_type", "unknown")
+        assert doc_type != "unknown", (
+            f"{fixture_path.name}: document type not identified after OCR. "
+            f"parsed_text preview: {result.parsed_text[:200]!r}"
+        )
+
+    @pytest.mark.parametrize("fixture_path,expected_type", _NO_TEXT_FIXTURES)
+    def test_no_text_pdf_is_truly_image_only(self, fixture_path, expected_type, tmp_path):
+        """Verify the fixture has no extractable text (confirming it will exercise OCR)."""
+        try:
+            import pypdf
+        except ImportError:
+            pytest.skip("pypdf not available")
+        reader = pypdf.PdfReader(str(fixture_path))
+        direct_text = "".join(p.extract_text() or "" for p in reader.pages).strip()
+        assert len(direct_text) < 100, (
+            f"{fixture_path.name}: pypdf extracted {len(direct_text)} chars — "
+            "this PDF is NOT image-only. Regenerate it with no searchable text."
         )
 
 
