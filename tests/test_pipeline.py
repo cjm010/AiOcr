@@ -992,6 +992,50 @@ class TestFixtureGroundTruth:
 
 
 # ---------------------------------------------------------------------------
+# Missing-data fixture assertions
+# ---------------------------------------------------------------------------
+
+class TestFixtureMissingData:
+    """Missing-data fixtures must have their null truth fields absent in extraction
+    and must be flagged needs_review=True."""
+
+    _MISSING_FIXTURES = [
+        pytest.param(FIXTURES / name, expected, id=name)
+        for name, expected in _TRUTH_DATA.items()
+        if "_missing" in name and (FIXTURES / name).exists()
+    ]
+
+    @pytest.mark.parametrize("fixture_path,expected", _MISSING_FIXTURES)
+    def test_missing_fixture_flagged_needs_review(self, fixture_path, expected, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        pipeline = _make_pipeline(tmp_path)
+        result = pipeline.process_bytes(fixture_path.name, fixture_path.read_bytes())
+        assert result.needs_review is True, (
+            f"{fixture_path.name}: expected needs_review=True but got False. "
+            f"Validation: {result.validation_results}"
+        )
+
+    @pytest.mark.parametrize("fixture_path,expected", _MISSING_FIXTURES)
+    def test_null_truth_fields_are_none_in_extraction(self, fixture_path, expected, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        pipeline = _make_pipeline(tmp_path)
+        result = pipeline.process_bytes(fixture_path.name, fixture_path.read_bytes())
+        extracted = result.extracted_data
+        wrongly_extracted = [
+            field for field, val in expected.items()
+            if val is None
+            and field not in ("document_type",)
+            and extracted.get(field) not in (None, "", [], {})
+        ]
+        assert wrongly_extracted == [], (
+            f"{fixture_path.name}: fields truth marks null but extractor found values for: "
+            f"{wrongly_extracted} — check if the PDF truly has those fields blank"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Unexpected extraction error handling (e.g. Groq "Execution failed")
 # ---------------------------------------------------------------------------
 
