@@ -909,9 +909,11 @@ def _fixture_pdfs():
 _TRUTH_DATA: dict[str, dict] = {}
 _TRUTH_DIR = FIXTURES / "truth_data"
 if _TRUTH_DIR.exists():
-    import json as _json
     for _f in sorted(_TRUTH_DIR.glob("*_truth.json")):
-        _TRUTH_DATA.update(_json.loads(_f.read_text()))
+        try:
+            _TRUTH_DATA.update(json.loads(_f.read_text()))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Malformed truth-data JSON in {_f.name}: {exc}") from exc
 
 
 def _truth_params():
