@@ -1,0 +1,67 @@
+{
+  "nda_format_a_full.pdf": {
+    "document_type": "nda",
+    "party_one_name": "TechVault Systems, Inc.",
+    "party_one_address": "200 Silicon Avenue, Palo Alto, CA 94301",
+    "party_two_name": "Quantum Bridge Partners, LLC",
+    "party_two_address": "888 Market Street, Suite 700, San Francisco, CA 94103",
+    "effective_date": "2024-01-15",
+    "expiration_date": "2026-01-15",
+    "confidentiality_period": "2 years",
+    "governing_law": "State of California",
+    "jurisdiction": "Santa Clara County, California",
+    "purpose": "Evaluation of potential technology licensing agreement between the parties"
+  },
+  "nda_format_a_similar.pdf": {
+    "document_type": "nda",
+    "party_one_name": "TechVault Systems, Inc.",
+    "party_one_address": "200 Silicon Avenue, Palo Alto, CA 94301",
+    "party_two_name": "Horizon Analytics Corp.",
+    "party_two_address": "1450 Broadway, New York, NY 10018",
+    "effective_date": "2024-04-01",
+    "expiration_date": "2026-04-01",
+    "confidentiality_period": "2 years",
+    "governing_law": "State of California",
+    "jurisdiction": "Santa Clara County, California",
+    "purpose": "Due diligence review in connection with a potential acquisition transaction"
+  },
+  "nda_format_a_missing.pdf": {
+    "document_type": "nda",
+    "party_one_name": "TechVault Systems, Inc.",
+    "party_one_address": "200 Silicon Avenue, Palo Alto, CA 94301",
+    "party_two_name": "BlueWave Innovations Ltd.",
+    "party_two_address": null,
+    "effective_date": "2024-06-10",
+    "expiration_date": null,
+    "confidentiality_period": "3 years",
+    "governing_law": null,
+    "jurisdiction": "To be determined",
+    "purpose": "Joint product development and technology sharing"
+  },
+  "nda_format_b_full.pdf": {
+    "document_type": "nda",
+    "party_one_name": "Granite Peak Capital LLC",
+    "party_one_address": "777 Financial District, Boston, MA 02110",
+    "party_two_name": "Evergreen Software Solutions, Inc.",
+    "party_two_address": "3000 Tech Center Drive, Austin, TX 78735",
+    "effective_date": "2024-02-28",
+    "expiration_date": "2027-02-28",
+    "confidentiality_period": "3 years",
+    "governing_law": "Commonwealth of Massachusetts",
+    "jurisdiction": "Suffolk County, Massachusetts",
+    "purpose": "Exploration of strategic partnership and co-development opportunities"
+  },
+  "nda_format_b_missing.pdf": {
+    "document_type": "nda",
+    "party_one_name": "Granite Peak Capital LLC",
+    "party_one_address": "777 Financial District, Boston, MA 02110",
+    "party_two_name": "Cascade Data Networks Inc.",
+    "party_two_address": null,
+    "effective_date": "2024-09-05",
+    "expiration_date": null,
+    "confidentiality_period": "2 years",
+    "governing_law": null,
+    "jurisdiction": "Suffolk County, Massachusetts",
+    "purpose": "Evaluation of cloud infrastructure partnership and data-sharing arrangements"
+  }
+}
