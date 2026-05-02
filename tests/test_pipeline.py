@@ -1219,6 +1219,98 @@ class TestFixtureOCR:
 
 
 # ---------------------------------------------------------------------------
+# Correction and learning approval flow
+# ---------------------------------------------------------------------------
+
+class TestFixtureCorrectionFlow:
+    """Full correction + learning approval cycle.
+
+    1. Process format_a_full.
+    2. Call finalize_review() with truth-data values + approve_for_future_matching=True.
+    3. Assert review saved, template learned, approved flag set.
+    4. Process format_a_similar — assert at least one Template-sourced field.
+    """
+
+    _CORRECTION_CASES = [
+        pytest.param(
+            FIXTURES / f"{doc_type}_format_a_full.pdf",
+            FIXTURES / f"{doc_type}_format_a_similar.pdf",
+            doc_type,
+            id=doc_type,
+        )
+        for doc_type in ("invoice", "medical_discharge", "nda", "lab_report", "business_doc")
+        if (FIXTURES / f"{doc_type}_format_a_full.pdf").exists()
+        and (FIXTURES / f"{doc_type}_format_a_similar.pdf").exists()
+        and f"{doc_type}_format_a_full.pdf" in _TRUTH_DATA
+    ]
+
+    @pytest.mark.parametrize("original,similar,doc_type", _CORRECTION_CASES)
+    def test_finalize_review_saves_and_approves(self, original, similar, doc_type, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+
+        pipeline = _make_pipeline(tmp_path)
+        r1 = pipeline.process_bytes(original.name, original.read_bytes())
+        assert not r1.summary.get("duplicate")
+
+        truth = _TRUTH_DATA[original.name]
+        corrected = {k: v for k, v in truth.items() if v is not None}
+        corrected["source_file"] = r1.source_file
+
+        review = pipeline.finalize_review(
+            source_file=r1.source_file,
+            upload_path=r1.upload_path,
+            parsed_text=r1.parsed_text,
+            corrected_data=corrected,
+            extraction_mode="adaptive-local",
+            learn_from_upload=True,
+            approve_for_future_matching=True,
+            content_hash=r1.content_hash,
+            original_extracted=r1.extracted_data,
+        )
+
+        assert review.summary.get("reviewed_by_user") is True
+        assert review.summary.get("approved_for_future_matching") is True
+        assert review.summary.get("learned_template") is not None, (
+            f"{original.name}: expected a template to be learned after approved review. "
+            f"Trace: {review.extraction_trace}"
+        )
+
+    @pytest.mark.parametrize("original,similar,doc_type", _CORRECTION_CASES)
+    def test_approved_template_used_for_similar_document(self, original, similar, doc_type, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+
+        pipeline = _make_pipeline(tmp_path)
+        r1 = pipeline.process_bytes(original.name, original.read_bytes())
+
+        truth = _TRUTH_DATA[original.name]
+        corrected = {k: v for k, v in truth.items() if v is not None}
+        corrected["source_file"] = r1.source_file
+
+        pipeline.finalize_review(
+            source_file=r1.source_file,
+            upload_path=r1.upload_path,
+            parsed_text=r1.parsed_text,
+            corrected_data=corrected,
+            extraction_mode="adaptive-local",
+            learn_from_upload=True,
+            approve_for_future_matching=True,
+            content_hash=r1.content_hash,
+            original_extracted=r1.extracted_data,
+        )
+
+        r2 = pipeline.process_bytes(similar.name, similar.read_bytes())
+        assert not r2.summary.get("duplicate")
+        template_fields = [f for f, s in r2.field_sources.items() if s == "Template"]
+        assert len(template_fields) > 0, (
+            f"{similar.name}: expected Template-sourced fields after approved review of "
+            f"{original.name}. field_sources={r2.field_sources}. "
+            f"Trace: {r2.extraction_trace}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Unexpected extraction error handling (e.g. Groq "Execution failed")
 # ---------------------------------------------------------------------------
 
