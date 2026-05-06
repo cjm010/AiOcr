@@ -148,7 +148,7 @@ def populated_db(tmp_path: Path) -> Path:
             ["Used `RuleBasedInvoiceExtractor` extraction."],
             processed_at=str(today),
         )
-        # Doc 7 — explicitly approved for future matching (counts as manual)
+        # Doc 7 — explicitly approved for future matching (approval only, NOT a manual correction)
         _add_doc(
             conn,
             "doc_approved_1.pdf",
@@ -192,11 +192,12 @@ class TestScalarMetrics:
         finally:
             conn.close()
 
-    def test_manual_corrections_includes_explicit_approval(self, populated_db: Path) -> None:
-        # doc_manual_1, doc_llm_then_manual, doc_approved_1 = 3 distinct
+    def test_manual_corrections_excludes_pure_approvals(self, populated_db: Path) -> None:
+        # doc_manual_1, doc_llm_then_manual = 2 distinct corrections
+        # doc_approved_1 has only an approval trace — must NOT be counted
         conn = sqlite3.connect(str(populated_db))
         try:
-            assert manual_corrections_count(conn) == 3
+            assert manual_corrections_count(conn) == 2
         finally:
             conn.close()
 
@@ -214,7 +215,7 @@ class TestScalarMetrics:
             "total_documents_processed": 7,
             "template_passed": 1,
             "llm_fallback": 3,
-            "manually_corrected": 3,
+            "manually_corrected": 2,
             "records_created": 7,
         }
 
@@ -340,6 +341,41 @@ class TestMetricsWithRealFixtures:
             conn.close()
         assert count == len(available), (
             f"Expected {len(available)} processed documents, got {count}"
+        )
+
+    def test_approval_without_changes_not_counted_as_manual_correction(self, tmp_path):
+        """Approving a result without editing any fields must not increment manually_corrected."""
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        fixture = next((f for f in _FORMAT_A_FULL if f.exists()), None)
+        if fixture is None:
+            pytest.skip("No format_a_full fixture found")
+
+        pipeline = self._make_pipeline(tmp_path)
+        r = pipeline.process_bytes(fixture.name, fixture.read_bytes())
+
+        # Approve without changing anything
+        pipeline.finalize_review(
+            source_file=r.source_file,
+            upload_path=r.upload_path,
+            parsed_text=r.parsed_text,
+            corrected_data=dict(r.extracted_data),
+            extraction_mode="adaptive-local",
+            learn_from_upload=True,
+            approve_for_future_matching=True,
+            content_hash=r.content_hash,
+            original_extracted=r.extracted_data,
+        )
+
+        from src.doc_ai.config import get_settings
+        db_path = get_settings().database_path
+        conn = sqlite3.connect(str(db_path))
+        try:
+            count = manual_corrections_count(conn)
+        finally:
+            conn.close()
+        assert count == 0, (
+            f"Expected 0 manual corrections after a no-change approval, got {count}"
         )
 
     def test_records_created_matches_fixture_count(self, tmp_path):

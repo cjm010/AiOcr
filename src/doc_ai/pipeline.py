@@ -267,7 +267,15 @@ class DocumentPipeline:
         # Preserve the original processing trace so metrics (LLM usage, template hits, etc.)
         # remain accurate after the user submits a review.
         prior_trace = self._store.get_processing_trace(source_file)
-        extraction_trace = prior_trace + ["Used human-reviewed corrections from the UI."]
+        _skip_meta = {"document_type", "source_file"}
+        _has_changes = original_extracted is not None and any(
+            corrected_data.get(f) != v
+            for f, v in original_extracted.items()
+            if f not in _skip_meta
+        )
+        extraction_trace = prior_trace[:]
+        if _has_changes:
+            extraction_trace.append("Used human-reviewed corrections from the UI.")
         if approve_for_future_matching:
             extraction_trace.append("User explicitly approved this result for future matching.")
 

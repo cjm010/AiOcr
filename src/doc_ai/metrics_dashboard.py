@@ -65,7 +65,6 @@ _TEMPLATE_HIT_VERBS: tuple[str, ...] = ("matched", "applied", "used")
 
 _MANUAL_CORRECTION_KEYWORDS: tuple[str, ...] = (
     "human-reviewed corrections",
-    "user explicitly approved",
 )
 
 
@@ -342,7 +341,8 @@ def render_metrics_dashboard(settings) -> None:
             "groq / openrouter / ollama / gemini. *Manually Corrected*: trace contains "
             "“human-reviewed corrections” or “user explicitly approved”. The five "
             "subset metrics are not mutually exclusive — a document can be both LLM-assisted "
-            "and manually corrected, for example."
+            "and manually corrected. *Manually Corrected* counts only documents where "
+            "field values were actually changed during review, not plain approvals."
         )
     finally:
         conn.close()
