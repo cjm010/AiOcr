@@ -396,7 +396,13 @@ def render_review_form(
             original_extracted=result.extracted_data,
         )
         st.session_state["last_result"] = reviewed_result
-        st.session_state.manual_corrections_total += 1
+        has_manual_edits = any(
+            s == "Manual" for s in reviewed_result.field_sources.values()
+        )
+        if has_manual_edits:
+            st.session_state.manual_corrections_total += 1
+        if approve_for_future_matching:
+            st.session_state.approvals_total += 1
         st.success("Reviewed values saved. The outputs and validation report have been updated.")
         st.rerun()
 
