@@ -305,7 +305,9 @@ class DocumentPipeline:
         # remain accurate after the user submits a review.
         prior_trace = self._store.get_processing_trace(source_file)
         _skip_meta = {"document_type", "source_file"}
-        _has_changes = original_extracted is not None and any(
+        # When original_extracted is provided we can compare precisely.
+        # When it is absent we cannot tell — assume the user reviewed the result.
+        _has_changes = original_extracted is None or any(
             not _field_values_equivalent(corrected_data.get(f), v)
             for f, v in original_extracted.items()
             if f not in _skip_meta
