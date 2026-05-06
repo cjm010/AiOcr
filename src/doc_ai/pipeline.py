@@ -458,6 +458,11 @@ class DocumentPipeline:
                 spatial_layouts = extract_spatial_layout(saved_path)
                 if spatial_layouts:
                     spatial_anchors = build_spatial_anchors(spatial_layouts, extracted_data)
+                else:
+                    extraction_trace.append(
+                        "Spatial layout extraction returned no data for this PDF — "
+                        "template signature will use text anchors only for future matching."
+                    )
             except Exception:
                 pass
 

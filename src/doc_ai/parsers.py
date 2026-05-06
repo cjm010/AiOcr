@@ -73,7 +73,8 @@ class DocumentParser:
             raise RuntimeError(
                 "Tesseract OCR is not installed or not on PATH. "
                 "This PDF appears to be image-only and requires Tesseract to extract text. "
-                "Install Tesseract: Windows → winget install UB-Mannheim.TesseractOCR, "
+                "Easiest fix: run the app via Docker — Tesseract is already bundled in the image. "
+                "Local install: Windows → winget install UB-Mannheim.TesseractOCR, "
                 "Linux → apt-get install tesseract-ocr, macOS → brew install tesseract."
             )
 
