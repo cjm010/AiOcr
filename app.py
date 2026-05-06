@@ -802,7 +802,12 @@ def render_single_tab(
             st.info("No validation checks were produced.")
         else:
             st.dataframe(validation_df, use_container_width=True)
-        render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
+        already_approved = result.summary.get("approved_for_future_matching", False)
+        if already_approved:
+            with st.expander("Correct extracted fields", expanded=False):
+                render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
+        else:
+            render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
 
     st.subheader("Agent trace")
     field_sources = getattr(result, "field_sources", {})
