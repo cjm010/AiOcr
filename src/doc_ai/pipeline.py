@@ -362,11 +362,20 @@ class DocumentPipeline:
             "approved_for_future_matching": approve_for_future_matching,
         }
 
-        field_sources = {
-            k: "Manual"
-            for k, v in corrected_data.items()
-            if k not in ("document_type", "source_file") and v not in (None, "", [], {})
-        }
+        # Rebuild field_sources: only mark fields as "Manual" when the user actually
+        # changed them. Unchanged fields keep their original source attribution.
+        original_sources = self._build_field_sources(
+            original_extracted or corrected_data, prior_trace
+        )
+        field_sources = {}
+        for k, v in corrected_data.items():
+            if k in ("document_type", "source_file") or v in (None, "", [], {}):
+                continue
+            orig_val = (original_extracted or {}).get(k)
+            if _has_changes and not _field_values_equivalent(v, orig_val):
+                field_sources[k] = "Manual"
+            else:
+                field_sources[k] = original_sources.get(k, "Rule-based")
         field_confidence = self._compute_field_confidence(
             corrected_data, validation_checks, extraction_trace, field_sources
         )

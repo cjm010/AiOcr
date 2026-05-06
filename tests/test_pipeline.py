@@ -1325,6 +1325,74 @@ class TestFixtureCorrectionFlow:
 
 
 # ---------------------------------------------------------------------------
+# field_sources after finalize_review
+# ---------------------------------------------------------------------------
+
+class TestFinalizeReviewFieldSources:
+    """finalize_review must preserve original source attribution for unchanged fields
+    and only mark actually-edited fields as Manual."""
+
+    def test_no_changes_preserves_original_sources(self, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        fixture = FIXTURES / "invoice_format_a_full.pdf"
+        if not fixture.exists():
+            pytest.skip("invoice_format_a_full.pdf not present")
+        pipeline = _make_pipeline(tmp_path)
+        r = pipeline.process_bytes(fixture.name, fixture.read_bytes())
+
+        reviewed = pipeline.finalize_review(
+            source_file=r.source_file,
+            upload_path=r.upload_path,
+            parsed_text=r.parsed_text,
+            corrected_data=dict(r.extracted_data),
+            extraction_mode="adaptive-local",
+            learn_from_upload=False,
+            approve_for_future_matching=False,
+            content_hash=r.content_hash,
+            original_extracted=r.extracted_data,
+        )
+        manual_fields = [f for f, s in reviewed.field_sources.items() if s == "Manual"]
+        assert manual_fields == [], (
+            f"No fields were edited but these were marked Manual: {manual_fields}"
+        )
+
+    def test_changed_field_marked_manual_unchanged_fields_keep_source(self, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        fixture = FIXTURES / "invoice_format_a_full.pdf"
+        if not fixture.exists():
+            pytest.skip("invoice_format_a_full.pdf not present")
+        pipeline = _make_pipeline(tmp_path)
+        r = pipeline.process_bytes(fixture.name, fixture.read_bytes())
+
+        corrected = dict(r.extracted_data)
+        corrected["vendor_name"] = "Manually Overridden Vendor"
+
+        reviewed = pipeline.finalize_review(
+            source_file=r.source_file,
+            upload_path=r.upload_path,
+            parsed_text=r.parsed_text,
+            corrected_data=corrected,
+            extraction_mode="adaptive-local",
+            learn_from_upload=False,
+            approve_for_future_matching=False,
+            content_hash=r.content_hash,
+            original_extracted=r.extracted_data,
+        )
+        assert reviewed.field_sources.get("vendor_name") == "Manual", (
+            "Edited field must be marked Manual"
+        )
+        non_manual = [
+            f for f, s in reviewed.field_sources.items()
+            if f != "vendor_name" and s == "Manual"
+        ]
+        assert non_manual == [], (
+            f"Unedited fields must not be marked Manual: {non_manual}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Unexpected extraction error handling (e.g. Groq "Execution failed")
 # ---------------------------------------------------------------------------
 
