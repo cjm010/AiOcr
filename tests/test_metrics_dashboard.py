@@ -344,7 +344,12 @@ class TestMetricsWithRealFixtures:
         )
 
     def test_approval_without_changes_not_counted_as_manual_correction(self, tmp_path):
-        """Approving a result without editing any fields must not increment manually_corrected."""
+        """Approving a result without editing any fields must not increment manually_corrected.
+
+        Uses a corrected_data dict that simulates coerce_form_data output — numeric strings
+        like "3,445.00" become floats like 3445.0. That type difference must NOT be treated
+        as a user correction.
+        """
         if not _PDF_LIBS_AVAILABLE:
             pytest.skip("PDF libraries not installed")
         fixture = next((f for f in _FORMAT_A_FULL if f.exists()), None)
@@ -354,12 +359,23 @@ class TestMetricsWithRealFixtures:
         pipeline = self._make_pipeline(tmp_path)
         r = pipeline.process_bytes(fixture.name, fixture.read_bytes())
 
-        # Approve without changing anything
+        # Simulate coerce_form_data: convert numeric-looking string values to floats
+        coerced = {}
+        for k, v in r.extracted_data.items():
+            if isinstance(v, str) and k in {"subtotal", "tax_amount", "total_amount",
+                                             "tax", "shipping_handling"}:
+                try:
+                    coerced[k] = float(v.replace(",", "").replace("$", ""))
+                except (ValueError, AttributeError):
+                    coerced[k] = v
+            else:
+                coerced[k] = v
+
         pipeline.finalize_review(
             source_file=r.source_file,
             upload_path=r.upload_path,
             parsed_text=r.parsed_text,
-            corrected_data=dict(r.extracted_data),
+            corrected_data=coerced,
             extraction_mode="adaptive-local",
             learn_from_upload=True,
             approve_for_future_matching=True,

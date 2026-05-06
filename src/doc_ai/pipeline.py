@@ -30,6 +30,43 @@ def _actual_extraction_mode(requested: str, trace: list[str]) -> str:
     return requested
 
 
+def _field_values_equivalent(a: Any, b: Any) -> bool:
+    """Return True when two field values represent the same content.
+
+    Handles the common case where form coercion turns "3,445.00" (str) into
+    3445.0 (float) — those should compare equal so a no-edit form submission
+    is not counted as a manual correction.
+    """
+    def _empty(v: Any) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, (str, list, dict)):
+            return not v
+        return False
+
+    if _empty(a) and _empty(b):
+        return True
+    if _empty(a) != _empty(b):
+        return False
+    if type(a) is type(b):
+        return a == b
+    # Cross-type: try numeric normalisation
+    def _to_float(v: Any) -> float | None:
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v.strip().replace(",", "").replace("$", ""))
+            except ValueError:
+                return None
+        return None
+
+    fa, fb = _to_float(a), _to_float(b)
+    if fa is not None and fb is not None:
+        return fa == fb
+    return str(a).strip() == str(b).strip()
+
+
 # Compiled once — used by DocumentPipeline._build_field_sources on every document.
 _GAP_RE = re.compile(r"^(.+?)\s+filled\s+\d+\s+\S+.*?:\s*(.+)\.$", re.IGNORECASE)
 _INFER_RE = re.compile(
@@ -269,7 +306,7 @@ class DocumentPipeline:
         prior_trace = self._store.get_processing_trace(source_file)
         _skip_meta = {"document_type", "source_file"}
         _has_changes = original_extracted is not None and any(
-            corrected_data.get(f) != v
+            not _field_values_equivalent(corrected_data.get(f), v)
             for f, v in original_extracted.items()
             if f not in _skip_meta
         )
