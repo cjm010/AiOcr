@@ -535,6 +535,14 @@ class RuleBasedInvoiceExtractor(BaseExtractor):
         "currency": [r"Currency\s*:\s*(?P<value>[A-Z]{3})"],
     }
 
+    # Lines matching this pattern are skipped when scanning for an unlabeled vendor name.
+    _VENDOR_SKIP_RE = re.compile(
+        r"^\s*(?:invoice|bill\s*to|billed\s*to|ship\s*to|date|due\s*date|po\s*(?:number|no|#)"
+        r"|payment|purchase\s*order|subtotal|total|tax|shipping|amount\s*due|from\s*:"
+        r"|vendor\s*:|supplier\s*:|customer\s*:|client\s*:|terms\s*:|currency\s*:|\d)",
+        re.IGNORECASE,
+    )
+
     def extract(self, parsed_document: ParsedDocument) -> dict[str, Any]:
         doc_type = detect_document_type(parsed_document.raw_text)
         if doc_type == "medical_discharge":
@@ -550,6 +558,21 @@ class RuleBasedInvoiceExtractor(BaseExtractor):
         extracted: dict[str, Any] = _empty_invoice(parsed_document.file_name)
 
         self._apply_patterns(text, self.FIELD_PATTERNS, extracted)
+
+        # First-line heuristic: if no labeled "Vendor:"/"Supplier:" line was found,
+        # the company name is often the very first text line before the word INVOICE.
+        # Only applies when the document has clear invoice markers (invoice number or
+        # INVOICE header), so that non-invoice documents falling through here are unaffected.
+        if not extracted.get("vendor_name") and re.search(
+            r"\b(?:INVOICE|Invoice\s*#|Invoice\s*Number)\b", text
+        ):
+            candidate_lines = [l.strip() for l in text.splitlines() if l.strip()]
+            for line in candidate_lines[:8]:
+                if re.search(r"\b(?:INVOICE|RECEIPT|STATEMENT)\b", line, re.IGNORECASE):
+                    break
+                if not self._VENDOR_SKIP_RE.match(line) and "@" not in line and 3 <= len(line) <= 100:
+                    extracted["vendor_name"] = line
+                    break
 
         _coerce_money_fields(extracted)
         extracted["line_items"] = _extract_line_items(text)
@@ -567,15 +590,19 @@ class TemplateOnlyExtractor(BaseExtractor):
     def extract_with_trace(self, parsed_document: ParsedDocument) -> tuple[dict[str, Any], list[str]]:
         trace = ["Started template-only extraction."]
         lines = parsed_document.sections
-        signature = TemplateMemory.build_signature(lines)
+        _, spatial_layouts = _collect_spatial_data(parsed_document, trace)
+        signature = TemplateMemory.build_signature(lines, layouts=spatial_layouts)
         doc_type = detect_document_type(parsed_document.raw_text)
-        match = self._template_memory.find_best_match(signature, document_type=doc_type)
+        match = self._template_memory.find_best_match(
+            signature, document_type=doc_type, raw_text=parsed_document.raw_text
+        )
         if not match or match.score < 0.55:
             raise ExtractionError("No close learned template was found for this document.")
 
         trace.append(f"Matched learned template `{match.template.get('template_name', 'unknown')}` with score {match.score}.")
         extracted = _empty_invoice(parsed_document.file_name)
         extracted.update(_extract_from_template(match.template, parsed_document.raw_text))
+        _apply_spatial_anchors(extracted, spatial_layouts, match, trace)
         return extracted, trace
 
 
@@ -743,7 +770,9 @@ class AdaptiveInvoiceAgent(BaseExtractor):
         trace.append("Generated document signature from top lines and keywords.")
 
         doc_type = detect_document_type(parsed_document.raw_text)
-        template_match = self._template_memory.find_best_match(signature, document_type=doc_type)
+        template_match = self._template_memory.find_best_match(
+            signature, document_type=doc_type, raw_text=parsed_document.raw_text
+        )
         if template_match:
             trace.append(
                 f"Best learned template candidate was `{template_match.template.get('template_name', 'unknown')}` "
@@ -811,7 +840,9 @@ class LLMAssistedInvoiceAgent(BaseExtractor):
 
         doc_type = detect_document_type(parsed_document.raw_text)
         trace.append(f"Detected document type: {doc_type}.")
-        template_match = self._template_memory.find_best_match(signature, document_type=doc_type)
+        template_match = self._template_memory.find_best_match(
+            signature, document_type=doc_type, raw_text=parsed_document.raw_text
+        )
         if template_match:
             trace.append(
                 f"Best learned template candidate was `{template_match.template.get('template_name', 'unknown')}` "

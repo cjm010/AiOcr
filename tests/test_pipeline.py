@@ -2514,3 +2514,253 @@ class TestFinalizeReviewPreservesProcessingTrace:
         llm_steps = [s for s in final_trace if "llm" in s.lower()]
         assert llm_steps, "LLM processing step must be preserved after finalize_review"
         assert any("human-reviewed" in s.lower() for s in final_trace), "Review step must also be present"
+
+
+# ---------------------------------------------------------------------------
+# Multi-field line anchor building (Fix A regression)
+# ---------------------------------------------------------------------------
+
+class TestMultiFieldLineAnchors:
+    """_build_anchors must produce bounded patterns for lines that pack multiple
+    'Label: value' pairs together, e.g. 'Invoice #: INV-001 Date: Jan 1 PO Number: PO-9'."""
+
+    MULTIFIELD_LINE = "Invoice #: INV-263322 Date: May 19, 2025 PO Number: PO-966171"
+    EXTRACTED = {
+        "document_type": "invoice",
+        "invoice_number": "INV-263322",
+        "invoice_date": "May 19, 2025",
+        "po_number": "PO-966171",
+    }
+
+    def _mem(self, tmp_path):
+        from src.doc_ai.template_memory import TemplateMemory
+        return TemplateMemory(tmp_path / "tmpl.json")
+
+    def test_invoice_number_anchor_built_from_multifield_line(self, tmp_path):
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "invoice_number" in anchors, "invoice_number anchor must be built from multi-field line"
+
+    def test_date_anchor_built_from_multifield_line(self, tmp_path):
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "invoice_date" in anchors, "invoice_date anchor must be built from multi-field line"
+
+    def test_po_number_anchor_built_from_multifield_line(self, tmp_path):
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "po_number" in anchors, "po_number anchor must be built from multi-field line"
+
+    def test_anchor_pattern_extracts_correct_value_on_new_document(self, tmp_path):
+        """Stored bounded pattern must capture the right value, not the full tail."""
+        import re
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "invoice_number" in anchors
+        pat = anchors["invoice_number"]["pattern"]
+        new_line = "Invoice #: INV-999999 Date: June 1, 2025 PO Number: PO-111111"
+        m = re.search(pat, new_line, re.IGNORECASE)
+        assert m is not None
+        assert m.group("value").strip() == "INV-999999"
+
+    def test_anchor_pattern_does_not_capture_adjacent_fields(self, tmp_path):
+        """Bounded pattern must stop before the next label, not bleed into it."""
+        import re
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "invoice_date" in anchors
+        pat = anchors["invoice_date"]["pattern"]
+        new_line = "Invoice #: INV-999999 Date: June 1, 2025 PO Number: PO-111111"
+        m = re.search(pat, new_line, re.IGNORECASE)
+        assert m is not None
+        captured = m.group("value").strip()
+        assert "PO Number" not in captured, f"Date anchor bled into PO Number: {captured!r}"
+        assert captured == "June 1, 2025"
+
+    def test_simple_single_label_line_still_works(self, tmp_path):
+        """Single-label lines must still produce a simple greedy pattern."""
+        import re
+        mem = self._mem(tmp_path)
+        extracted = {"document_type": "invoice", "due_date": "May 31, 2025"}
+        anchors = mem._build_anchors(extracted, ["Due Date: May 31, 2025"])
+        assert "due_date" in anchors
+        pat = anchors["due_date"]["pattern"]
+        m = re.search(pat, "Due Date: June 15, 2026", re.IGNORECASE)
+        assert m is not None
+        assert m.group("value").strip() == "June 15, 2026"
+
+
+# ---------------------------------------------------------------------------
+# Multi-field row splitting in spatial extractor (Fix B regression)
+# ---------------------------------------------------------------------------
+
+class TestSplitMultifieldValue:
+    """_split_multifield_value must split 'Label1: v1 Label2: v2' rows correctly."""
+
+    def test_splits_three_field_invoice_line(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        text = "Invoice #: INV-263322 Date: May 19, 2025 PO Number: PO-966171"
+        result = _split_multifield_value(text)
+        assert result.get("invoice #") == "INV-263322"
+        assert result.get("date") == "May 19, 2025"
+        assert result.get("po number") == "PO-966171"
+
+    def test_returns_empty_for_single_colon_line(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        result = _split_multifield_value("Invoice Number: INV-001")
+        assert result == {}
+
+    def test_returns_empty_for_no_colon_line(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        assert _split_multifield_value("just some text here") == {}
+
+    def test_does_not_include_unknown_labels(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        text = "Invoice #: INV-001 FooBarBaz: xyz"
+        result = _split_multifield_value(text)
+        # Only 'invoice #' is a known label; FooBarBaz is not → fewer than 2 known labels
+        assert result == {}
+
+    def test_two_known_labels_splits_correctly(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        result = _split_multifield_value("Due Date: May 31, 2025 Total: 1500.00")
+        assert result.get("due date") == "May 31, 2025"
+        assert result.get("total") == "1500.00"
+
+
+# ---------------------------------------------------------------------------
+# TemplateOnlyExtractor uses spatial anchors (Fix C regression)
+# ---------------------------------------------------------------------------
+
+class TestTemplateOnlyExtractorUsesSpatialsAnchors:
+    """TemplateOnlyExtractor must call _apply_spatial_anchors after text anchor
+    extraction so stored position-based anchors are also consulted."""
+
+    def test_spatial_anchors_called_after_text_anchors_in_template_only_mode(self, tmp_path):
+        """_apply_spatial_anchors must be reached after _extract_from_template.
+
+        Store a template with one text anchor (so it matches via anchor fallback)
+        but an empty zone_density.  The spatial_anchors list is present but empty
+        so _apply_spatial_anchors is a no-op — what matters is the call happens
+        without raising and the trace includes the template match message.
+        """
+        import json
+        from src.doc_ai.extractors import TemplateOnlyExtractor
+        from src.doc_ai.template_memory import TemplateMemory
+        from src.doc_ai.schemas import ParsedDocument
+
+        store = tmp_path / "tmpl.json"
+        mem = TemplateMemory(store)
+
+        # Template with a text anchor that matches raw_text so score >= 0.55 via
+        # the anchor-fallback path in find_best_match (zone_density is empty on
+        # both sides → cosine_similarity = 0.0 → text anchor fallback fires).
+        template = {
+            "template_name": "test_inv",
+            "document_type": "invoice",
+            "signature": {"zone_density": []},
+            "anchors": {
+                "invoice_number": {
+                    "label": "Invoice #",
+                    "pattern": r"Invoice \#\s*:\s*(?P<value>.+)",
+                }
+            },
+            "spatial_anchors": [],
+        }
+        store.write_text(json.dumps([template]))
+
+        doc = ParsedDocument(
+            file_name="invoice.pdf",
+            file_path=None,
+            raw_text="Invoice #: INV-001\nTotal: $500.00",
+            sections=["Invoice #: INV-001", "Total: $500.00"],
+            metadata={},
+        )
+        extractor = TemplateOnlyExtractor(mem)
+        result, trace = extractor.extract_with_trace(doc)
+
+        assert any("template" in step.lower() for step in trace), "template match step must appear in trace"
+        # Text anchor extracted the invoice number
+        assert result.get("invoice_number") == "INV-001"
+
+
+# ---------------------------------------------------------------------------
+# First-line vendor_name heuristic (regression for unlabeled company name)
+# ---------------------------------------------------------------------------
+
+class TestFirstLineVendorNameHeuristic:
+    """RuleBasedInvoiceExtractor must extract vendor_name from the first text
+    line when no labeled Vendor:/Supplier:/From: line is present."""
+
+    def _make_doc(self, text: str) -> "ParsedDocument":
+        from src.doc_ai.schemas import ParsedDocument
+        return ParsedDocument(
+            file_name="inv.pdf",
+            file_path=None,
+            raw_text=text,
+            sections=[l.strip() for l in text.splitlines() if l.strip()],
+            metadata={},
+        )
+
+    def test_unlabeled_company_name_first_line(self):
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "Atlas Financial Services\n"
+            "990 Park Avenue, New York\n"
+            "INVOICE\n"
+            "Invoice #: INV-001\n"
+            "Date: May 1, 2025\n"
+            "Total: $500.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        assert result["vendor_name"] == "Atlas Financial Services"
+
+    def test_labeled_vendor_takes_precedence(self):
+        """When a Vendor: label is present the heuristic must not override it."""
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "Some Header Line\n"
+            "INVOICE\n"
+            "Vendor: Acme Corp\n"
+            "Invoice #: INV-002\n"
+            "Total: $200.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        assert result["vendor_name"] == "Acme Corp"
+
+    def test_does_not_capture_address_line(self):
+        """A first line starting with a digit (street address) must be skipped."""
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "123 Main Street\n"
+            "Best Supplies Co\n"
+            "INVOICE\n"
+            "Invoice #: INV-003\n"
+            "Total: $100.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        # Address line must be skipped; company name on second line is captured
+        assert result["vendor_name"] == "Best Supplies Co"
+
+    def test_stops_before_invoice_keyword(self):
+        """Lines at or after the INVOICE header must not be captured."""
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "INVOICE\n"
+            "Invoice #: INV-004\n"
+            "Total: $300.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        assert result["vendor_name"] is None
+
+    def test_does_not_capture_email_line(self):
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "billing@example.com\n"
+            "Greenleaf Office Supplies\n"
+            "INVOICE\n"
+            "Invoice #: INV-005\n"
+            "Total: $150.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        assert result["vendor_name"] == "Greenleaf Office Supplies"

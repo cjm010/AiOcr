@@ -50,12 +50,24 @@ class TemplateMemory:
         self,
         signature: dict[str, Any],
         document_type: str | None = None,
+        raw_text: str | None = None,
     ) -> TemplateMatch | None:
         best_match: TemplateMatch | None = None
         for template in self.load_templates():
             if document_type and template.get("document_type") != document_type:
                 continue
             score = self._score_signature(signature, template.get("signature", {}))
+            # Spatial comparison unavailable (zone_density empty on either side) —
+            # fall back to anchor label-pattern coverage as a discriminative proxy.
+            if score == 0.0 and raw_text:
+                anchors = template.get("anchors", {})
+                if anchors:
+                    matches = sum(
+                        1 for anchor_data in anchors.values()
+                        if anchor_data.get("pattern")
+                        and re.search(anchor_data["pattern"], raw_text, re.IGNORECASE)
+                    )
+                    score = round(matches / len(anchors), 4)
             if best_match is None or score > best_match.score:
                 best_match = TemplateMatch(template=template, score=score)
         return best_match
@@ -118,6 +130,17 @@ class TemplateMemory:
     def _build_anchors(self, extracted_data: dict[str, Any], lines: list[str]) -> dict[str, dict[str, str]]:
         anchors: dict[str, dict[str, str]] = {}
         used_patterns: set[str] = set()
+
+        # Reverse mapping field_name → known label strings, used for bounded-pattern fallback
+        # on lines that pack multiple "Label: Value" pairs together.
+        field_to_labels: dict[str, list[str]] = {}
+        try:
+            from .spatial_extractor import _LABEL_TO_FIELD as _ltf
+            for lbl, fld in _ltf.items():
+                field_to_labels.setdefault(fld, []).append(lbl)
+        except ImportError:
+            pass
+
         for field, value in extracted_data.items():
             if field in {"document_type", "source_file"} or value in (None, "", []):
                 continue
@@ -126,24 +149,42 @@ class TemplateMemory:
                 line_text = line.strip()
                 if not line_text or value_text.lower() not in line_text.lower():
                     continue
+
+                # --- Simple case: single label before the first colon on this line ---
                 label = self._extract_label(line_text)
-                if not label:
-                    continue
-                pattern = rf"{re.escape(label)}\s*:\s*(?P<value>.+)"
-                if pattern in used_patterns:
-                    continue
-                # Verify the pattern captures exactly the expected value on this line.
-                # If it captures much more (e.g. the value is buried in a longer string),
-                # the anchor would extract wrong data on future documents.
-                m = re.search(pattern, line_text, re.IGNORECASE)
-                if not m:
-                    continue
-                captured = m.group("value").strip()
-                if captured.lower() != value_text.lower():
-                    continue
-                used_patterns.add(pattern)
-                anchors[field] = {"label": label, "pattern": pattern}
-                break
+                if label:
+                    pattern = rf"{re.escape(label)}\s*:\s*(?P<value>.+)"
+                    if pattern not in used_patterns:
+                        m = re.search(pattern, line_text, re.IGNORECASE)
+                        if m and m.group("value").strip().lower() == value_text.lower():
+                            used_patterns.add(pattern)
+                            anchors[field] = {"label": label, "pattern": pattern}
+                            break
+
+                # --- Multi-field line fallback: lines like "Label1: v1 Label2: v2 ..." ---
+                # Find the correct sub-label for this field using known label strings and
+                # build a bounded non-greedy pattern that stops before the next "Uppercase
+                # Label:" segment, so future documents with different values still match.
+                for known_label in field_to_labels.get(field, []):
+                    if not re.search(
+                        rf"(?:^|\s){re.escape(known_label)}\s*:", line_text, re.IGNORECASE
+                    ):
+                        continue
+                    bounded = (
+                        rf"(?<![:\w]){re.escape(known_label)}\s*:\s*"
+                        rf"(?P<value>[^\n]*?)(?=\s+[A-Z#][\w\s#-]*\s*:|\n|\Z)"
+                    )
+                    if bounded in used_patterns:
+                        continue
+                    test = re.search(bounded, line_text, re.IGNORECASE)
+                    if test and test.group("value").strip().lower() == value_text.lower():
+                        used_patterns.add(bounded)
+                        anchors[field] = {"label": known_label, "pattern": bounded}
+                        break
+                else:
+                    continue  # no known_label produced a match — try the next line
+                break  # found a bounded match — move on to the next field
+
         return anchors
 
     @staticmethod
