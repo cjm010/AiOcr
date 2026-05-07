@@ -232,6 +232,81 @@ def _backfill_daily(df: pd.DataFrame, days: int) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Per-type field stats query functions
+# ---------------------------------------------------------------------------
+
+
+def doc_types_with_field_stats(conn: sqlite3.Connection) -> list[str]:
+    """Return document types that have at least one row in field_stats."""
+    if not _table_exists(conn, "field_stats"):
+        return []
+    rows = conn.execute(
+        "SELECT DISTINCT document_type FROM field_stats ORDER BY document_type"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def field_null_rates(conn: sqlite3.Connection, doc_type: str) -> pd.DataFrame:
+    """Columns: field, total_docs, extracted, null_rate_pct (0–100)."""
+    if not _table_exists(conn, "field_stats"):
+        return pd.DataFrame(columns=["field", "total_docs", "extracted", "null_rate_pct"])
+    sql = """
+        SELECT field_name AS field,
+               COUNT(*) AS total_docs,
+               SUM(CASE WHEN is_null=0 THEN 1 ELSE 0 END) AS extracted,
+               ROUND(SUM(is_null) * 100.0 / COUNT(*), 1) AS null_rate_pct
+        FROM field_stats
+        WHERE document_type = ?
+        GROUP BY field_name
+    """
+    return pd.read_sql_query(sql, conn, params=(doc_type,))
+
+
+def field_extraction_sources(conn: sqlite3.Connection, doc_type: str) -> pd.DataFrame:
+    """Columns: field, top_source, source_breakdown (e.g. 'Template (7), Rule-based (2)')."""
+    if not _table_exists(conn, "field_stats"):
+        return pd.DataFrame(columns=["field", "top_source", "source_breakdown"])
+    sql = """
+        SELECT field_name AS field,
+               extraction_source,
+               COUNT(*) AS cnt
+        FROM field_stats
+        WHERE document_type = ? AND is_null = 0 AND extraction_source IS NOT NULL
+        GROUP BY field_name, extraction_source
+        ORDER BY field_name, cnt DESC
+    """
+    raw = pd.read_sql_query(sql, conn, params=(doc_type,))
+    if raw.empty:
+        return pd.DataFrame(columns=["field", "top_source", "source_breakdown"])
+    rows = []
+    for field, grp in raw.groupby("field", sort=False):
+        top = grp.iloc[0]["extraction_source"]
+        breakdown = ", ".join(
+            f"{r['extraction_source']} ({r['cnt']})" for _, r in grp.iterrows()
+        )
+        rows.append({"field": field, "top_source": top, "source_breakdown": breakdown})
+    return pd.DataFrame(rows)
+
+
+def field_avg_confidence(conn: sqlite3.Connection, doc_type: str) -> pd.DataFrame:
+    """Columns: field, avg_confidence, min_confidence, max_confidence (non-null extractions only)."""
+    if not _table_exists(conn, "field_stats"):
+        return pd.DataFrame(
+            columns=["field", "avg_confidence", "min_confidence", "max_confidence"]
+        )
+    sql = """
+        SELECT field_name AS field,
+               ROUND(AVG(confidence), 3) AS avg_confidence,
+               ROUND(MIN(confidence), 3) AS min_confidence,
+               ROUND(MAX(confidence), 3) AS max_confidence
+        FROM field_stats
+        WHERE document_type = ? AND is_null = 0 AND confidence IS NOT NULL
+        GROUP BY field_name
+    """
+    return pd.read_sql_query(sql, conn, params=(doc_type,))
+
+
+# ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
 
