@@ -22,7 +22,7 @@ FIELD_CATALOG: dict[str, list[dict[str, Any]]] = {
         {"key": "shipping_handling",  "label": "Shipping & Handling",      "db_type": "REAL", "required": False, "default": True},
         {"key": "total_amount",       "label": "Total Amount",             "db_type": "REAL", "required": True,  "default": True},
         {"key": "currency",           "label": "Currency",                 "db_type": "TEXT", "required": False, "default": True},
-        {"key": "line_items",         "label": "Line Items (JSON)",        "db_type": "TEXT", "required": False, "default": True},
+        {"key": "line_items",         "label": "Line Items (JSON)",        "db_type": "TEXT", "required": True,  "default": True},
     ],
     "medical_discharge": [
         {"key": "patient_name",             "label": "Patient Name",                    "db_type": "TEXT",    "required": True,  "default": True},

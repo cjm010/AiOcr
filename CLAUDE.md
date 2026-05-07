@@ -25,10 +25,10 @@ The pipeline has five layers. Understand all of them before making changes:
 
 Supporting modules:
 
-- `src/doc_ai/pipeline.py` — orchestrates parsing → extraction → validation → storage → template learning; owns `_compute_field_confidence()`
+- `src/doc_ai/pipeline.py` — orchestrates parsing → extraction → validation → storage → template learning; owns `_compute_field_confidence()` and `_build_field_sources()` (both run on every document)
 - `src/doc_ai/schema_config.py` — `FIELD_CATALOG`, `TABLE_NAMES`, `SchemaConfig` for per-type DB field selection
-- `src/doc_ai/schemas.py` — shared dataclasses (`PipelineResult`, `ParsedDocument`, `ValidationCheck`)
-- `src/doc_ai/template_memory.py` — learned template signatures and anchors
+- `src/doc_ai/schemas.py` — shared dataclasses (`PipelineResult`, `ParsedDocument`, `ValidationCheck`); `PipelineResult` carries both `field_confidence: dict[str, float]` and `field_sources: dict[str, str]` (source method per field)
+- `src/doc_ai/template_memory.py` — learned template signatures and anchors (`TemplateMemory`); also exports `BadPatternStore` (persists bad field values learned from human corrections to `bad_patterns.json`)
 - `src/doc_ai/config.py` — `Settings` dataclass (frozen); use `dataclasses.replace()` to override at runtime
 
 ## Supported Document Types
@@ -41,7 +41,7 @@ Supporting modules:
 | `lab_report` | `RuleBasedLabReportExtractor` | `LabReportValidator` | `lab_reports` |
 | `business_doc` | `RuleBasedBusinessDocExtractor` | `BusinessDocValidator` | `business_docs` |
 
-Adding a new document type requires changes in: `extractors.py`, `validators.py`, `schema_config.py`, `storage.py`, `app.py` (FIELDS_BY_TYPE, LIST_FIELDS_BY_TYPE), and both test files.
+Adding a new document type requires changes in: `extractors.py`, `validators.py`, `schema_config.py`, `storage.py`, `app.py` (FIELDS_BY_TYPE, LIST_FIELDS_BY_TYPE), all test files, and the fixture set (see [Test Fixtures](#test-fixtures) below).
 
 ---
 
@@ -60,12 +60,14 @@ Adding a new document type requires changes in: `extractors.py`, `validators.py`
 |---|---|
 | Pipeline, extractors, validators, schema config, confidence scoring | `tests/test_pipeline.py` |
 | UI layout, widgets, tab content, session state, admin controls | `tests/test_ui.py` |
-| App config and settings | `tests/test_config.py` |
+| App config, settings, OCR library/binary availability | `tests/test_config.py` |
+| Metrics dashboard helpers (`get_metrics`, `llm_usage_daily`, etc.) | `tests/test_metrics_dashboard.py` |
+| Browser-level end-to-end upload and processing flows | `tests/test_e2e.py` |
 
 ### Running tests
 
 ```bash
-# Full suite
+# Full suite (excludes E2E — no browser required)
 pytest tests/ -v
 
 # By file
@@ -74,9 +76,14 @@ pytest tests/test_ui.py -v
 
 # Single class
 pytest tests/test_ui.py::TestAdminDashboard -v
+
+# E2E only (requires: pip install -r requirements-e2e.txt && playwright install chromium)
+pytest tests/test_e2e.py -m e2e -v
 ```
 
 Tests must pass on Python 3.11 and 3.12. CI uses `requirements-test.txt` (lean — no PDF/OCR/LLM stack). Heavy imports in `parsers.py` and `extractors.py` are all lazy (`try/except ImportError`) so they are safe to omit in CI.
+
+E2E tests are excluded from CI by default (they require a running browser and Streamlit server). Run them locally before releasing user-visible UI changes.
 
 ### Streamlit AppTest patterns
 
@@ -119,18 +126,70 @@ Fixture PDFs live in `tests/fixtures/`. Use `pytest.skip()` when a fixture is mi
 
 ---
 
+## Test Fixtures
+
+`tests/fixtures/` contains 45 purpose-built PDFs — 9 per document type — covering all test scenarios. Do not add numbered generic fixtures (old `invoice_001.pdf` style is gone).
+
+### Fixture naming convention
+
+```
+{type}_format_a_full.pdf       # complete data, Format A layout (primary fixture)
+{type}_format_b_full.pdf       # complete data, Format B layout (alternate layout)
+{type}_format_a_similar.pdf    # complete data, same layout as A (template matching pair)
+{type}_format_a_missing.pdf    # missing optional fields, Format A
+{type}_format_b_missing.pdf    # missing optional fields, Format B
+{type}_no_text_full.pdf        # image-only PDF, complete data (requires Tesseract)
+{type}_no_text_missing.pdf     # image-only PDF, missing fields (requires Tesseract)
+{type}_format_a_full_dup.pdf   # byte-identical copy of format_a_full (dedup testing)
+{type}_no_text_dup.pdf         # byte-identical copy of no_text_full (dedup testing)
+```
+
+`{type}` is one of: `invoice`, `medical_discharge`, `nda`, `lab_report`, `business_doc`.
+
+### Ground-truth JSON
+
+`tests/fixtures/truth_data/{type}_truth.json` holds expected field values for the five searchable fixtures (full A, similar A, missing A, full B, missing B). The module-level `_TRUTH_DATA` dict in `test_pipeline.py` loads all truth files at import time.
+
+When adding a new document type, add a corresponding `{type}_truth.json` with entries for all five searchable scenarios.
+
+### OCR / Tesseract guard
+
+`test_pipeline.py` exposes `_TESSERACT_AVAILABLE` (bool, set at module load). Tests that require Tesseract must guard themselves:
+
+```python
+if not _TESSERACT_AVAILABLE:
+    pytest.skip("Tesseract not installed — OCR unavailable")
+```
+
+No-text dup tests guard on `"no_text" in fixture_name and not _TESSERACT_AVAILABLE` — image-only PDFs can't produce a content hash without Tesseract, so duplicate detection never fires.
+
+### Test classes in `test_pipeline.py` covering fixtures
+
+| Class | What it tests |
+|---|---|
+| `TestFixtureGroundTruth` | Document type ID and field extraction vs truth data (parametrized) |
+| `TestFixtureMissingData` | Null truth fields are `None`; missing fixtures flagged `needs_review` |
+| `TestFixtureDuplicateDetection` | Content-hash dedup: dup after original → `duplicate=True`; dup alone → not flagged |
+| `TestFixtureTemplateMatching` | `format_a_similar` reuses template learned from `format_a_full`; field source is `Template` |
+| `TestFixtureOCR` | Image-only PDFs produce non-empty parsed text and correct doc type (requires Tesseract) |
+| `TestFixtureCorrectionFlow` | `finalize_review()` saves corrections; `approve_for_future_matching=True` triggers learning |
+
+---
+
 ## Code Patterns
 
 ### Adding a new document type extractor
 
 1. Add detection signals to `_DOC_TYPE_SIGNALS` in `extractors.py`
 2. Add an `_empty_<type>()` function returning the skeleton dict with all fields as `None`
-3. Add a `RuleBased<Type>Extractor` class with an `extract(parsed_document)` method
+3. Add a `RuleBased<Type>Extractor` class that inherits from `BaseExtractor` with an `extract(parsed_document)` method
 4. Add routing in `RuleBasedInvoiceExtractor.extract()` (it routes all types)
 5. Register in `build_extractor()` if needed
 6. Add a `<Type>Validator` class in `validators.py` and register in `get_validator()`
 7. Add fields to `FIELD_CATALOG` and `TABLE_NAMES` in `schema_config.py`
 8. Add `FIELDS_BY_TYPE` and `LIST_FIELDS_BY_TYPE` entries in `app.py`
+9. Add 9 fixture PDFs to `tests/fixtures/` following the naming convention above
+10. Add `tests/fixtures/truth_data/{type}_truth.json` with expected field values for the 5 searchable fixtures
 
 ### Settings overrides at runtime
 
@@ -159,6 +218,20 @@ This means on first load the default applies; after the user visits Admin Dashbo
 assert conf["field"] == pytest.approx(0.75 * 0.75, abs=0.001)  # not exact float math
 ```
 
+Per-source confidence baselines used as starting points (defined in `pipeline.py`):
+
+| Source | Baseline |
+|---|---|
+| `Cross-validated` | 0.97 |
+| `Manual` | 0.95 |
+| `LLM` | 0.88 |
+| `Template` | 0.82 |
+| `Spatial` | 0.78 |
+| `Rule-based` | 0.72 |
+| `Inferred` | 0.65 |
+
+`_build_field_sources()` populates `PipelineResult.field_sources` by parsing the extraction trace. Both methods run together after every extraction.
+
 ### Heavy dependencies are lazy
 
 `unstructured`, `pypdf`, `pdfplumber`, `pypdfium2`, `pytesseract`, `Pillow`, and `openai` are all imported inside `try/except ImportError` blocks. Never add them as top-level imports. This keeps the test suite runnable without the full dependency stack.
@@ -178,6 +251,10 @@ assert conf["field"] == pytest.approx(0.75 * 0.75, abs=0.001)  # not exact float
 **Template learning is skipped for `llm-assisted` mode** until a user explicitly approves the result. `allow_automatic_learning=False` is passed in that case. Do not remove this guard.
 
 **`finalize_review()` uses `get_validator()`**, not a `self._validator` attribute. There is no instance-level validator on `DocumentPipeline`. Always route through `get_validator(doc_type)`.
+
+**LLM result is merged per-field, not as a wholesale overwrite**: `_merge_llm_result()` in `extractors.py` applies the LLM value only when the LLM returned one; the prior extracted value is restored when the LLM returns null. When both the LLM and the prior method independently produced the same value, the field is recorded as `Cross-validated` and its confidence is boosted to 0.97. Do not reintroduce a wholesale overwrite for new extraction paths.
+
+**`_resolve_schema_fields()` in `app.py`** is the single source of truth for resolving field order, list fields, and optional fields from `SchemaConfig`/`FIELD_CATALOG`. Use it instead of duplicating that logic.
 
 ---
 

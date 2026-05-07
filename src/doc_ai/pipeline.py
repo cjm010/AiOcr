@@ -30,6 +30,43 @@ def _actual_extraction_mode(requested: str, trace: list[str]) -> str:
     return requested
 
 
+def _field_values_equivalent(a: Any, b: Any) -> bool:
+    """Return True when two field values represent the same content.
+
+    Handles the common case where form coercion turns "3,445.00" (str) into
+    3445.0 (float) — those should compare equal so a no-edit form submission
+    is not counted as a manual correction.
+    """
+    def _empty(v: Any) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, (str, list, dict)):
+            return not v
+        return False
+
+    if _empty(a) and _empty(b):
+        return True
+    if _empty(a) != _empty(b):
+        return False
+    if type(a) is type(b):
+        return a == b
+    # Cross-type: try numeric normalisation
+    def _to_float(v: Any) -> float | None:
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v.strip().replace(",", "").replace("$", ""))
+            except ValueError:
+                return None
+        return None
+
+    fa, fb = _to_float(a), _to_float(b)
+    if fa is not None and fb is not None:
+        return fa == fb
+    return str(a).strip() == str(b).strip()
+
+
 # Compiled once — used by DocumentPipeline._build_field_sources on every document.
 _GAP_RE = re.compile(r"^(.+?)\s+filled\s+\d+\s+\S+.*?:\s*(.+)\.$", re.IGNORECASE)
 _INFER_RE = re.compile(
@@ -64,6 +101,29 @@ class DocumentPipeline:
     def _compute_text_hash(text: str) -> str:
         normalized = " ".join(text.lower().split())
         return hashlib.sha256(normalized.encode()).hexdigest()
+
+    @staticmethod
+    def _compute_semantic_fingerprint(doc_type: str, extracted: dict) -> str:
+        """Hash the document's key identifying fields as a format-agnostic fingerprint.
+
+        Catches the same document processed twice in different forms (e.g. scanned
+        image-only PDF vs. text-based PDF) where the raw text hash would differ.
+        Returns empty string when fewer than 2 key fields have values — not enough
+        to form a reliable fingerprint.
+        """
+        key_fields: dict[str, list[str]] = {
+            "invoice": ["vendor_name", "invoice_number", "invoice_date", "total_amount"],
+            "business_doc": ["company_name", "report_id", "report_date"],
+            "medical_discharge": ["patient_name", "facility_name", "admission_date"],
+            "nda": ["disclosing_party", "receiving_party", "agreement_date"],
+            "lab_report": ["patient_id", "lab_name", "collected_date"],
+        }
+        fields = key_fields.get(doc_type, [])
+        values = [str(extracted.get(f) or "").strip().lower() for f in fields]
+        non_empty = [v for v in values if v]
+        if len(non_empty) < 2:
+            return ""
+        return hashlib.sha256("|".join(values).encode()).hexdigest()
 
     def process_bytes(
         self,
@@ -204,6 +264,32 @@ class DocumentPipeline:
             or rule_based_fallback
         )
 
+        doc_type = extracted_data.get("document_type", "invoice")
+        semantic_fingerprint = self._compute_semantic_fingerprint(doc_type, extracted_data)
+        if semantic_fingerprint and self._store.has_been_processed_by_fingerprint(semantic_fingerprint):
+            return PipelineResult(
+                source_file=saved_path.name,
+                upload_path=str(saved_path),
+                parsed_text=parsed_document.raw_text,
+                extracted_data={"document_type": doc_type, "source_file": saved_path.name},
+                validation_results=[],
+                output_files={},
+                summary={
+                    "source_file": saved_path.name,
+                    "extraction_mode": extraction_mode,
+                    "duplicate": True,
+                },
+                errors=["Duplicate: same document was already processed in a different format (e.g. scanned vs. text-based PDF)."],
+                extraction_trace=["Semantic fingerprint matched an existing record — this document's key fields match one already processed."],
+                content_hash=content_hash,
+                needs_review=False,
+            )
+
+        field_sources = self._build_field_sources(extracted_data, extraction_trace)
+        field_confidence = self._compute_field_confidence(
+            extracted_data, validation_checks, extraction_trace, field_sources
+        )
+
         output_files = self._store.persist(
             saved_path.name,
             extracted_data,
@@ -211,6 +297,9 @@ class DocumentPipeline:
             extraction_trace,
             content_hash=content_hash,
             original_filename=file_name,
+            semantic_fingerprint=semantic_fingerprint,
+            field_sources=field_sources,
+            field_confidence=field_confidence,
         )
 
         summary = {
@@ -226,11 +315,6 @@ class DocumentPipeline:
             "outputs_written": list(output_files.keys()),
             "needs_review": needs_review,
         }
-
-        field_sources = self._build_field_sources(extracted_data, extraction_trace)
-        field_confidence = self._compute_field_confidence(
-            extracted_data, validation_checks, extraction_trace, field_sources
-        )
 
         return PipelineResult(
             source_file=saved_path.name,
@@ -267,7 +351,17 @@ class DocumentPipeline:
         # Preserve the original processing trace so metrics (LLM usage, template hits, etc.)
         # remain accurate after the user submits a review.
         prior_trace = self._store.get_processing_trace(source_file)
-        extraction_trace = prior_trace + ["Used human-reviewed corrections from the UI."]
+        _skip_meta = {"document_type", "source_file"}
+        # When original_extracted is provided we can compare precisely.
+        # When it is absent we cannot tell — assume the user reviewed the result.
+        _has_changes = original_extracted is None or any(
+            not _field_values_equivalent(corrected_data.get(f), v)
+            for f, v in original_extracted.items()
+            if f not in _skip_meta
+        )
+        extraction_trace = prior_trace[:]
+        if _has_changes:
+            extraction_trace.append("Used human-reviewed corrections from the UI.")
         if approve_for_future_matching:
             extraction_trace.append("User explicitly approved this result for future matching.")
 
@@ -303,7 +397,30 @@ class DocumentPipeline:
         if learned_template_name:
             extraction_trace.append(f"Learned or updated template `{learned_template_name}` from reviewed data.")
 
-        output_files = self._store.persist(source_file, corrected_data, validation_checks, extraction_trace, content_hash=content_hash)
+        # Rebuild field_sources: only mark fields as "Manual" when the user actually
+        # changed them. Unchanged fields keep their original source attribution.
+        original_sources = self._build_field_sources(
+            original_extracted or corrected_data, prior_trace
+        )
+        field_sources = {}
+        for k, v in corrected_data.items():
+            if k in ("document_type", "source_file") or v in (None, "", [], {}):
+                continue
+            orig_val = (original_extracted or {}).get(k)
+            if _has_changes and not _field_values_equivalent(v, orig_val):
+                field_sources[k] = "Manual"
+            else:
+                field_sources[k] = original_sources.get(k, "Rule-based")
+        field_confidence = self._compute_field_confidence(
+            corrected_data, validation_checks, extraction_trace, field_sources
+        )
+
+        output_files = self._store.persist(
+            source_file, corrected_data, validation_checks, extraction_trace,
+            content_hash=content_hash,
+            field_sources=field_sources,
+            field_confidence=field_confidence,
+        )
         summary = {
             "source_file": source_file,
             "extraction_mode": extraction_mode,
@@ -316,15 +433,6 @@ class DocumentPipeline:
             "reviewed_by_user": True,
             "approved_for_future_matching": approve_for_future_matching,
         }
-
-        field_sources = {
-            k: "Manual"
-            for k, v in corrected_data.items()
-            if k not in ("document_type", "source_file") and v not in (None, "", [], {})
-        }
-        field_confidence = self._compute_field_confidence(
-            corrected_data, validation_checks, extraction_trace, field_sources
-        )
 
         return PipelineResult(
             source_file=source_file,
@@ -402,6 +510,11 @@ class DocumentPipeline:
                 spatial_layouts = extract_spatial_layout(saved_path)
                 if spatial_layouts:
                     spatial_anchors = build_spatial_anchors(spatial_layouts, extracted_data)
+                else:
+                    extraction_trace.append(
+                        "Spatial layout extraction returned no data for this PDF — "
+                        "template signature will use text anchors only for future matching."
+                    )
             except Exception:
                 pass
 

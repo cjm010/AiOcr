@@ -1,0 +1,138 @@
+{
+  "invoice_format_a_full.pdf": {
+    "document_type": "invoice",
+    "invoice_number": "INV-2024-0047",
+    "vendor_name": "Apex Solutions Inc.",
+    "vendor_address": "123 Tech Boulevard, Suite 400\nAustin, TX 78701",
+    "customer_name": "Meridian Retail Group",
+    "customer_address": "456 Commerce Drive\nDallas, TX 75201",
+    "invoice_date": "2024-03-15",
+    "due_date": "2024-04-15",
+    "line_items": [
+      {
+        "description": "Software License (Annual)",
+        "quantity": 5,
+        "unit_price": "299.00",
+        "total": "1,495.00"
+      },
+      {
+        "description": "Implementation Services",
+        "quantity": 10,
+        "unit_price": "150.00",
+        "total": "1,500.00"
+      },
+      {
+        "description": "Technical Support Package",
+        "quantity": 1,
+        "unit_price": "450.00",
+        "total": "450.00"
+      }
+    ],
+    "subtotal": "3,445.00",
+    "tax_rate": "8.25%",
+    "tax_amount": "284.21",
+    "total_amount": "3,729.21",
+    "payment_terms": "Net 30",
+    "currency": "USD"
+  },
+  "invoice_format_a_similar.pdf": {
+    "document_type": "invoice",
+    "invoice_number": "INV-2024-0118",
+    "vendor_name": "Apex Solutions Inc.",
+    "vendor_address": "123 Tech Boulevard, Suite 400\nAustin, TX 78701",
+    "customer_name": "Northstar Logistics LLC",
+    "customer_address": "789 Industrial Parkway\nHouston, TX 77001",
+    "invoice_date": "2024-05-22",
+    "due_date": "2024-06-22",
+    "line_items": [
+      {
+        "description": "Cloud Infrastructure Setup",
+        "quantity": 1,
+        "unit_price": "2,800.00",
+        "total": "2,800.00"
+      },
+      {
+        "description": "User Training Sessions",
+        "quantity": 4,
+        "unit_price": "350.00",
+        "total": "1,400.00"
+      }
+    ],
+    "subtotal": "4,200.00",
+    "tax_rate": "8.25%",
+    "tax_amount": "346.50",
+    "total_amount": "4,546.50",
+    "payment_terms": "Net 30",
+    "currency": "USD"
+  },
+  "invoice_format_a_missing.pdf": {
+    "document_type": "invoice",
+    "invoice_number": "INV-2024-0203",
+    "vendor_name": "Apex Solutions Inc.",
+    "vendor_address": "123 Tech Boulevard, Suite 400\nAustin, TX 78701",
+    "customer_name": "Summit Enterprises",
+    "customer_address": "321 Business Park\nSan Antonio, TX 78201",
+    "invoice_date": "2024-07-10",
+    "due_date": null,
+    "line_items": null,
+    "subtotal": "1,875.00",
+    "tax_rate": "8.25%",
+    "tax_amount": "154.69",
+    "total_amount": null,
+    "payment_terms": "Net 45",
+    "currency": "USD"
+  },
+  "invoice_format_b_full.pdf": {
+    "document_type": "invoice",
+    "invoice_number": "INV-2024-0312",
+    "vendor_name": "Nexus Consulting Group",
+    "vendor_address": "500 Innovation Way\nChicago, IL 60601",
+    "customer_name": "Pacific Edge Ventures",
+    "customer_address": "1200 Harbor Boulevard\nLos Angeles, CA 90001",
+    "invoice_date": "2024-08-01",
+    "due_date": "2024-09-01",
+    "line_items": [
+      {
+        "description": "Strategic Analysis Report",
+        "quantity": 1,
+        "unit_price": "5,000.00",
+        "total": "5,000.00"
+      },
+      {
+        "description": "Market Research (hrs)",
+        "quantity": 20,
+        "unit_price": "225.00",
+        "total": "4,500.00"
+      },
+      {
+        "description": "Presentation Design",
+        "quantity": 1,
+        "unit_price": "800.00",
+        "total": "800.00"
+      }
+    ],
+    "subtotal": "10,300.00",
+    "tax_rate": "9.5%",
+    "tax_amount": "978.50",
+    "total_amount": "11,278.50",
+    "payment_terms": "Net 30",
+    "currency": "USD"
+  },
+  "invoice_format_b_missing.pdf": {
+    "document_type": "invoice",
+    "invoice_number": "INV-2024-0425",
+    "vendor_name": "Nexus Consulting Group",
+    "vendor_address": "500 Innovation Way\nChicago, IL 60601",
+    "customer_name": "Redwood Capital Partners",
+    "customer_address": "88 Market Street\nSan Francisco, CA 94105",
+    "invoice_date": "2024-09-15",
+    "due_date": null,
+    "line_items": null,
+    "subtotal": "2,650.00",
+    "tax_rate": "9.5%",
+    "tax_amount": "251.75",
+    "total_amount": null,
+    "payment_terms": "Net 60",
+    "currency": "USD"
+  }
+}
