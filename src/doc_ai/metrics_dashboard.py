@@ -311,6 +311,78 @@ def field_avg_confidence(conn: sqlite3.Connection, doc_type: str) -> pd.DataFram
 # ---------------------------------------------------------------------------
 
 
+def _render_field_stats_tab(
+    conn: sqlite3.Connection,
+    doc_type: str,
+    show_null: bool,
+    show_method: bool,
+    show_conf: bool,
+) -> None:
+    import streamlit as st
+
+    from .schema_config import FIELD_CATALOG
+
+    catalog_fields = [f["key"] for f in FIELD_CATALOG.get(doc_type, [])]
+    if not catalog_fields:
+        st.info(f"No field catalog defined for document type '{doc_type}'.")
+        return
+
+    display = pd.DataFrame({"Field": catalog_fields})
+
+    if show_null:
+        nr = field_null_rates(conn, doc_type)
+        if not nr.empty:
+            nr = nr.rename(columns={"null_rate_pct": "Null Rate %", "field": "Field"})
+            display = display.merge(nr[["Field", "Null Rate %"]], on="Field", how="left")
+        else:
+            display["Null Rate %"] = pd.NA
+
+    if show_method:
+        es = field_extraction_sources(conn, doc_type)
+        if not es.empty:
+            es = es.rename(columns={"field": "Field", "source_breakdown": "Extraction Method"})
+            display = display.merge(es[["Field", "Extraction Method"]], on="Field", how="left")
+        else:
+            display["Extraction Method"] = None
+
+    if show_conf:
+        ac = field_avg_confidence(conn, doc_type)
+        if not ac.empty:
+            ac = ac.rename(columns={"field": "Field", "avg_confidence": "Avg Confidence"})
+            display = display.merge(ac[["Field", "Avg Confidence"]], on="Field", how="left")
+        else:
+            display["Avg Confidence"] = pd.NA
+
+    # Fill text columns before building styler; numeric columns stay NaN so
+    # background_gradient can process them, then na_rep="—" handles display.
+    if "Extraction Method" in display.columns:
+        display["Extraction Method"] = display["Extraction Method"].fillna("—")
+
+    format_dict: dict[str, str] = {}
+    styler = display.style
+
+    if show_null and "Null Rate %" in display.columns:
+        numeric_null = pd.to_numeric(display["Null Rate %"], errors="coerce")
+        if numeric_null.notna().any():
+            styler = styler.background_gradient(
+                subset=["Null Rate %"], cmap="RdYlGn_r", vmin=0, vmax=100
+            )
+        format_dict["Null Rate %"] = "{:.1f}%"
+
+    if show_conf and "Avg Confidence" in display.columns:
+        numeric_conf = pd.to_numeric(display["Avg Confidence"], errors="coerce")
+        if numeric_conf.notna().any():
+            styler = styler.background_gradient(
+                subset=["Avg Confidence"], cmap="RdYlGn", vmin=0, vmax=1
+            )
+        format_dict["Avg Confidence"] = "{:.3f}"
+
+    if format_dict:
+        styler = styler.format(format_dict, na_rep="—")
+
+    st.dataframe(styler, use_container_width=True, hide_index=True)
+
+
 def render_metrics_dashboard(settings) -> None:
     """Render the Metrics Dashboard tab.
 
@@ -429,6 +501,31 @@ def render_metrics_dashboard(settings) -> None:
             "and manually corrected. *Manually Corrected* counts only documents where "
             "field values were actually changed during review, not plain approvals."
         )
+
+        st.divider()
+
+        # ---- Per Document Type Analysis ------------------------------------------
+        st.subheader("Per Document Type Analysis")
+        col1, col2, col3 = st.columns(3)
+        show_null = col1.checkbox("Null Rate", value=True, key="fstats_show_null")
+        show_method = col2.checkbox("Extraction Method", value=True, key="fstats_show_method")
+        show_conf = col3.checkbox("Avg Confidence", value=True, key="fstats_show_conf")
+
+        if not any([show_null, show_method, show_conf]):
+            st.info("Select at least one column to display.")
+        else:
+            available_types = doc_types_with_field_stats(conn)
+            if not available_types:
+                st.info(
+                    "No field-level stats yet — process a document to populate this section."
+                )
+            else:
+                tabs = st.tabs([t.replace("_", " ").title() for t in available_types])
+                for tab, doc_type in zip(tabs, available_types):
+                    with tab:
+                        _render_field_stats_tab(
+                            conn, doc_type, show_null, show_method, show_conf
+                        )
     finally:
         conn.close()
 
