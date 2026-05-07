@@ -77,7 +77,17 @@ class BaseExtractor:
             for pattern in field_patterns:
                 m = re.search(pattern, text, re.IGNORECASE)
                 if m:
-                    extracted[field] = m.group("value").strip()
+                    value = m.group("value").strip()
+                    # Reject blank-fill placeholders whose value either has no
+                    # alphanumeric content at all (e.g. "| |") or starts with a
+                    # run of repeated non-alphanumeric filler characters
+                    # (e.g. "_____________", "--- Date: X" where the real value
+                    # is blank and the regex greedily captured following content).
+                    if not re.search(r"[a-zA-Z0-9]", value):
+                        continue
+                    if re.match(r"^[_\-=~]{3,}", value):
+                        continue
+                    extracted[field] = value
                     break
 
 
@@ -420,7 +430,7 @@ class RuleBasedBusinessDocExtractor(BaseExtractor):
             r"Prepared\s+by\s*:\s*(?P<value>[^\n,]+)",
         ],
         "approved_by": [
-            r"Approved\s+by\s*:\s*(?P<value>[^\|\n]+?)(?:\s*\||\s*$)",
+            r"Approved\s+by\s*:\s*(?P<value>[a-zA-Z][^\|\n]*?)(?:\s*\||\s*$)",
         ],
         "classification": [
             r"Document\s+Classification\s*:\s*(?P<value>[^\|\n]+)",
