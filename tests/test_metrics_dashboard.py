@@ -528,3 +528,40 @@ class TestFieldStatsMetrics:
         ).fetchone()[0]
         conn.close()
         assert count == 0, "Semantic duplicate must not write field_stats rows"
+
+    def test_field_stats_have_source_and_confidence_after_process_bytes(self, tmp_path):
+        """After process_bytes, extracted fields must have non-null source and confidence in field_stats."""
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.pipeline import DocumentPipeline
+        import dataclasses
+        import sqlite3
+
+        get_settings.cache_clear()
+        s = get_settings()
+        s = dataclasses.replace(s, data_dir=tmp_path)
+        pipeline = DocumentPipeline(s)
+
+        text = (
+            "Acme Corp\nINVOICE\n"
+            "Invoice Number: INV-001\nInvoice Date: 2025-01-15\nTotal: $100.00\n"
+        )
+        pipeline.process_bytes("inv.txt", text.encode())
+
+        conn = sqlite3.connect(str(s.database_path))
+        # Find any non-null field row for this upload
+        rows = conn.execute(
+            "SELECT field_name, extraction_source, confidence "
+            "FROM field_stats WHERE is_null=0"
+        ).fetchall()
+        conn.close()
+
+        assert rows, "Expected at least one non-null field_stats row after processing"
+        for field_name, extraction_source, confidence in rows:
+            assert extraction_source is not None, (
+                f"extraction_source is None for field '{field_name}' — "
+                "field_sources must be passed to persist() before computation"
+            )
+            assert confidence is not None, (
+                f"confidence is None for field '{field_name}' — "
+                "field_confidence must be passed to persist() before computation"
+            )
