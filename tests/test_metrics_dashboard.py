@@ -439,6 +439,32 @@ class TestFieldStatsMetrics:
         )
         return ResultStore(s)
 
+    def _make_pipeline(self, tmp_path: Path):
+        """Return (pipeline, settings) fully isolated to tmp_path."""
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.pipeline import DocumentPipeline
+        import dataclasses
+        get_settings.cache_clear()
+        s = get_settings()
+        uploads = tmp_path / "uploads"
+        outputs = tmp_path / "outputs"
+        review_exports = tmp_path / "review_exports"
+        uploads.mkdir(exist_ok=True)
+        outputs.mkdir(exist_ok=True)
+        review_exports.mkdir(exist_ok=True)
+        s = dataclasses.replace(
+            s,
+            data_dir=tmp_path,
+            upload_dir=uploads,
+            output_dir=outputs,
+            review_export_dir=review_exports,
+            database_path=tmp_path / "document_results.db",
+            template_store_path=tmp_path / "learned_templates.json",
+            promoted_template_store_path=tmp_path / "promoted_templates.json",
+            bad_patterns_path=tmp_path / "bad_patterns.json",
+        )
+        return DocumentPipeline(s), s
+
     def test_field_stats_written_on_persist(self, tmp_path):
         """persist() with field_sources/field_confidence writes one row per field."""
         from src.doc_ai.schemas import ValidationCheck
@@ -503,14 +529,9 @@ class TestFieldStatsMetrics:
 
     def test_field_stats_not_written_for_semantic_duplicate(self, tmp_path):
         """Semantic-fingerprint dedup early return must not write any field_stats rows."""
-        from src.doc_ai.config import get_settings
-        from src.doc_ai.pipeline import DocumentPipeline
-        import dataclasses
+        import sqlite3
 
-        get_settings.cache_clear()
-        s = get_settings()
-        s = dataclasses.replace(s, data_dir=tmp_path)
-        pipeline = DocumentPipeline(s)
+        pipeline, s = self._make_pipeline(tmp_path)
 
         text = (
             "Acme Corp\nINVOICE\n"
@@ -518,28 +539,28 @@ class TestFieldStatsMetrics:
         )
         # First upload — stored normally
         pipeline.process_bytes("inv.txt", text.encode())
+
+        conn = sqlite3.connect(str(s.database_path))
+        count_after_first = conn.execute("SELECT COUNT(*) FROM field_stats").fetchone()[0]
+        conn.close()
+
         # Second upload — same key fields, slightly different bytes → semantic dup
         pipeline.process_bytes("inv_copy.txt", (text + "\n").encode())
 
-        import sqlite3
         conn = sqlite3.connect(str(s.database_path))
-        count = conn.execute(
-            "SELECT COUNT(*) FROM field_stats WHERE source_file='inv_copy.txt'"
-        ).fetchone()[0]
+        count_after_dup = conn.execute("SELECT COUNT(*) FROM field_stats").fetchone()[0]
         conn.close()
-        assert count == 0, "Semantic duplicate must not write field_stats rows"
+
+        assert count_after_dup == count_after_first, (
+            "Semantic duplicate must not add new field_stats rows "
+            f"(was {count_after_first}, now {count_after_dup})"
+        )
 
     def test_field_stats_have_source_and_confidence_after_process_bytes(self, tmp_path):
         """After process_bytes, extracted fields must have non-null source and confidence in field_stats."""
-        from src.doc_ai.config import get_settings
-        from src.doc_ai.pipeline import DocumentPipeline
-        import dataclasses
         import sqlite3
 
-        get_settings.cache_clear()
-        s = get_settings()
-        s = dataclasses.replace(s, data_dir=tmp_path)
-        pipeline = DocumentPipeline(s)
+        pipeline, s = self._make_pipeline(tmp_path)
 
         text = (
             "Acme Corp\nINVOICE\n"
@@ -548,7 +569,6 @@ class TestFieldStatsMetrics:
         pipeline.process_bytes("inv.txt", text.encode())
 
         conn = sqlite3.connect(str(s.database_path))
-        # Find any non-null field row for this upload
         rows = conn.execute(
             "SELECT field_name, extraction_source, confidence "
             "FROM field_stats WHERE is_null=0"
