@@ -704,7 +704,7 @@ def _apply_spatial_anchors(
         if anchor_fields:
             filled = [
                 f for f, v in anchor_fields.items()
-                if extracted.get(f) in (None, "", []) and v not in (None, "", [])
+                if f in extracted and extracted[f] in (None, "", []) and v not in (None, "", [])
             ]
             for f in filled:
                 extracted[f] = anchor_fields[f]
@@ -723,10 +723,14 @@ def _fill_rule_based_gaps(
     trace: list[str],
     source: str = "Rule-based extraction",
 ) -> None:
-    """Copy fields from *rule_extracted* into *extracted* wherever the value is still missing."""
+    """Copy fields from *rule_extracted* into *extracted* wherever the value is still missing.
+
+    Only fills fields that already exist as keys in *extracted* so that invoice-specific
+    fields (e.g. invoice_date) are never injected into business_doc or other doc-type results.
+    """
     gaps = [
         f for f, v in rule_extracted.items()
-        if extracted.get(f) in (None, "", []) and v not in (None, "", [])
+        if f in extracted and extracted[f] in (None, "", []) and v not in (None, "", [])
     ]
     for f in gaps:
         extracted[f] = rule_extracted[f]
