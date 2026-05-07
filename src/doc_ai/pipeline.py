@@ -397,20 +397,6 @@ class DocumentPipeline:
         if learned_template_name:
             extraction_trace.append(f"Learned or updated template `{learned_template_name}` from reviewed data.")
 
-        output_files = self._store.persist(source_file, corrected_data, validation_checks, extraction_trace, content_hash=content_hash)
-        summary = {
-            "source_file": source_file,
-            "extraction_mode": extraction_mode,
-            "validation_passes": sum(check.status == "pass" for check in validation_checks),
-            "validation_fails": sum(check.status == "fail" for check in validation_checks),
-            "validation_warnings": sum(check.status == "warn" for check in validation_checks),
-            "template_learning_enabled": self._settings.enable_template_learning and learn_from_upload,
-            "learned_template": learned_template_name,
-            "outputs_written": list(output_files.keys()),
-            "reviewed_by_user": True,
-            "approved_for_future_matching": approve_for_future_matching,
-        }
-
         # Rebuild field_sources: only mark fields as "Manual" when the user actually
         # changed them. Unchanged fields keep their original source attribution.
         original_sources = self._build_field_sources(
@@ -428,6 +414,25 @@ class DocumentPipeline:
         field_confidence = self._compute_field_confidence(
             corrected_data, validation_checks, extraction_trace, field_sources
         )
+
+        output_files = self._store.persist(
+            source_file, corrected_data, validation_checks, extraction_trace,
+            content_hash=content_hash,
+            field_sources=field_sources,
+            field_confidence=field_confidence,
+        )
+        summary = {
+            "source_file": source_file,
+            "extraction_mode": extraction_mode,
+            "validation_passes": sum(check.status == "pass" for check in validation_checks),
+            "validation_fails": sum(check.status == "fail" for check in validation_checks),
+            "validation_warnings": sum(check.status == "warn" for check in validation_checks),
+            "template_learning_enabled": self._settings.enable_template_learning and learn_from_upload,
+            "learned_template": learned_template_name,
+            "outputs_written": list(output_files.keys()),
+            "reviewed_by_user": True,
+            "approved_for_future_matching": approve_for_future_matching,
+        }
 
         return PipelineResult(
             source_file=source_file,
