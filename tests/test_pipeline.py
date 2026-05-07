@@ -2862,3 +2862,117 @@ class TestBusinessDocOcrKpiAndPipeFilter:
         )
         assert "approved by" not in result, "Pipe-only value should be filtered out"
         assert result.get("prepared by") == "Kevin Mitchell"
+
+
+class TestSemanticFingerprint:
+    """Tests for _compute_semantic_fingerprint and semantic-fingerprint dedup."""
+
+    def test_returns_empty_when_fewer_than_two_fields(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        result = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice", {"vendor_name": "Acme", "invoice_number": None, "invoice_date": None, "total_amount": None}
+        )
+        assert result == "", "Single populated field should not produce a fingerprint"
+
+    def test_returns_empty_for_unknown_doc_type(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        result = DocumentPipeline._compute_semantic_fingerprint("unknown_type", {"foo": "bar"})
+        assert result == ""
+
+    def test_returns_hash_when_two_or_more_fields_populated(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        result = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "Acme Corp", "invoice_number": "INV-001",
+             "invoice_date": "2025-01-15", "total_amount": None},
+        )
+        assert len(result) == 64, "Should return a SHA-256 hex digest (64 chars)"
+
+    def test_fingerprint_is_case_insensitive(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        fp1 = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "ACME CORP", "invoice_number": "INV-001",
+             "invoice_date": "2025-01-15", "total_amount": "100.00"},
+        )
+        fp2 = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "acme corp", "invoice_number": "inv-001",
+             "invoice_date": "2025-01-15", "total_amount": "100.00"},
+        )
+        assert fp1 == fp2, "Fingerprint must be case-insensitive"
+
+    def test_different_docs_produce_different_fingerprints(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        fp1 = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "Acme", "invoice_number": "INV-001",
+             "invoice_date": "2025-01-15", "total_amount": "100.00"},
+        )
+        fp2 = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "Acme", "invoice_number": "INV-002",
+             "invoice_date": "2025-01-15", "total_amount": "100.00"},
+        )
+        assert fp1 != fp2
+
+    def test_store_fingerprint_dedup(self, tmp_path):
+        """has_been_processed_by_fingerprint returns False before persist, True after."""
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.storage import ResultStore
+        from src.doc_ai.schemas import ValidationCheck
+        import dataclasses
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        settings = dataclasses.replace(
+            settings, data_dir=tmp_path, database_path=tmp_path / "test.db",
+            output_dir=tmp_path,
+        )
+        store = ResultStore(settings)
+
+        fp = "a" * 64  # fake 64-char fingerprint
+        assert not store.has_been_processed_by_fingerprint(fp)
+        assert not store.has_been_processed_by_fingerprint("")  # empty must never match
+
+        dummy_check = ValidationCheck(field="invoice_number", status="pass", message="ok")
+        store.persist(
+            source_file_name="doc.pdf",
+            extracted_data={"document_type": "invoice", "invoice_number": "INV-001"},
+            validation_checks=[dummy_check],
+            extraction_trace=["step 1"],
+            content_hash="",
+            original_filename="doc.pdf",
+            semantic_fingerprint=fp,
+        )
+        assert store.has_been_processed_by_fingerprint(fp)
+
+    def test_pipeline_blocks_semantic_duplicate(self, tmp_path):
+        """Processing the same doc twice (different bytes, same extracted fields) is blocked."""
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.pipeline import DocumentPipeline
+        import dataclasses
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        settings = dataclasses.replace(settings, data_dir=tmp_path)
+        pipeline = DocumentPipeline(settings)
+
+        invoice_text = (
+            "Acme Corp\n"
+            "INVOICE\n"
+            "Invoice Number: INV-2025-001\n"
+            "Invoice Date: 2025-01-15\n"
+            "Total: $250.00\n"
+        )
+        # First upload
+        r1 = pipeline.process_bytes("inv.txt", _txt_bytes(invoice_text))
+        assert not any("Semantic fingerprint" in e for e in r1.errors), \
+            "First upload should not be flagged as duplicate"
+
+        # Second upload with slightly different raw bytes (extra trailing newline) but same content
+        r2 = pipeline.process_bytes("inv_copy.txt", _txt_bytes(invoice_text + "\n\n"))
+        is_dup = r2.summary.get("duplicate") or any(
+            "Semantic fingerprint" in e or "Duplicate" in e for e in r2.errors
+        )
+        assert is_dup, "Second upload of same document must be flagged as duplicate"

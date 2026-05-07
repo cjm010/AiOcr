@@ -102,6 +102,29 @@ class DocumentPipeline:
         normalized = " ".join(text.lower().split())
         return hashlib.sha256(normalized.encode()).hexdigest()
 
+    @staticmethod
+    def _compute_semantic_fingerprint(doc_type: str, extracted: dict) -> str:
+        """Hash the document's key identifying fields as a format-agnostic fingerprint.
+
+        Catches the same document processed twice in different forms (e.g. scanned
+        image-only PDF vs. text-based PDF) where the raw text hash would differ.
+        Returns empty string when fewer than 2 key fields have values — not enough
+        to form a reliable fingerprint.
+        """
+        key_fields: dict[str, list[str]] = {
+            "invoice": ["vendor_name", "invoice_number", "invoice_date", "total_amount"],
+            "business_doc": ["company_name", "report_id", "report_date"],
+            "medical_discharge": ["patient_name", "facility_name", "admission_date"],
+            "nda": ["disclosing_party", "receiving_party", "agreement_date"],
+            "lab_report": ["patient_id", "lab_name", "collected_date"],
+        }
+        fields = key_fields.get(doc_type, [])
+        values = [str(extracted.get(f) or "").strip().lower() for f in fields]
+        non_empty = [v for v in values if v]
+        if len(non_empty) < 2:
+            return ""
+        return hashlib.sha256("|".join(values).encode()).hexdigest()
+
     def process_bytes(
         self,
         file_name: str,
@@ -241,6 +264,27 @@ class DocumentPipeline:
             or rule_based_fallback
         )
 
+        doc_type = extracted_data.get("document_type", "invoice")
+        semantic_fingerprint = self._compute_semantic_fingerprint(doc_type, extracted_data)
+        if semantic_fingerprint and self._store.has_been_processed_by_fingerprint(semantic_fingerprint):
+            return PipelineResult(
+                source_file=saved_path.name,
+                upload_path=str(saved_path),
+                parsed_text=parsed_document.raw_text,
+                extracted_data={"document_type": doc_type, "source_file": saved_path.name},
+                validation_results=[],
+                output_files={},
+                summary={
+                    "source_file": saved_path.name,
+                    "extraction_mode": extraction_mode,
+                    "duplicate": True,
+                },
+                errors=["Duplicate: same document was already processed in a different format (e.g. scanned vs. text-based PDF)."],
+                extraction_trace=["Semantic fingerprint matched an existing record — this document's key fields match one already processed."],
+                content_hash=content_hash,
+                needs_review=False,
+            )
+
         output_files = self._store.persist(
             saved_path.name,
             extracted_data,
@@ -248,6 +292,7 @@ class DocumentPipeline:
             extraction_trace,
             content_hash=content_hash,
             original_filename=file_name,
+            semantic_fingerprint=semantic_fingerprint,
         )
 
         summary = {

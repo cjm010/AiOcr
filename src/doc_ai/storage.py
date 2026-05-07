@@ -76,6 +76,7 @@ class ResultStore:
             new_columns = {
                 # Core / invoice
                 "content_hash": "TEXT DEFAULT ''",
+                "semantic_fingerprint": "TEXT DEFAULT ''",
                 "original_filename": "TEXT DEFAULT ''",
                 "currency": "TEXT",
                 "shipping_handling": "REAL",
@@ -244,6 +245,28 @@ class ResultStore:
         finally:
             conn.close()
 
+    def has_been_processed_by_fingerprint(self, semantic_fingerprint: str) -> bool:
+        """Return True if a document with the same semantic fingerprint was already stored.
+
+        Used as a secondary dedup gate after extraction to catch the same document
+        processed in two different formats (e.g. scanned image-only vs. text-based PDF).
+        Never matches on empty fingerprint.
+        """
+        if not semantic_fingerprint or not Path(self._settings.database_path).exists():
+            return False
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "SELECT 1 FROM document_results "
+                "WHERE semantic_fingerprint = ? AND semantic_fingerprint != '' LIMIT 1",
+                (semantic_fingerprint,),
+            )
+            return cursor.fetchone() is not None
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            conn.close()
+
     def persist(
         self,
         source_file_name: str,
@@ -252,6 +275,7 @@ class ResultStore:
         extraction_trace: list[str],
         content_hash: str = "",
         original_filename: str = "",
+        semantic_fingerprint: str = "",
     ) -> dict[str, str]:
         stem = Path(source_file_name).stem
         json_path = self._settings.output_dir / f"{stem}.json"
@@ -268,6 +292,7 @@ class ResultStore:
             extraction_trace,
             content_hash=content_hash,
             original_filename=original_filename,
+            semantic_fingerprint=semantic_fingerprint,
         )
 
         return {
@@ -285,11 +310,13 @@ class ResultStore:
         extraction_trace: list[str],
         content_hash: str = "",
         original_filename: str = "",
+        semantic_fingerprint: str = "",
     ) -> None:
         with _DB_WRITE_LOCK:
             self._write_sqlite_locked(
                 source_file_name, extracted_data, validation_checks,
                 extraction_trace, content_hash, original_filename,
+                semantic_fingerprint=semantic_fingerprint,
             )
 
     def _write_sqlite_locked(
@@ -300,6 +327,7 @@ class ResultStore:
         extraction_trace: list[str],
         content_hash: str = "",
         original_filename: str = "",
+        semantic_fingerprint: str = "",
     ) -> None:
         conn = self._connect()
         try:
@@ -321,6 +349,7 @@ class ResultStore:
                         "source_file": source_file_name,
                         "original_filename": original_filename or source_file_name,
                         "content_hash": content_hash,
+                        "semantic_fingerprint": semantic_fingerprint,
                         **serialized,
                     }
                 ]
