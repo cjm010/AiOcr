@@ -415,3 +415,87 @@ class TestMetricsWithRealFixtures:
         assert count == len(available), (
             f"Expected {len(available)} per-type records, got {count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# field_stats table — write path tests
+# ---------------------------------------------------------------------------
+
+
+class TestFieldStatsMetrics:
+    """Tests for field_stats table write path and query functions."""
+
+    def _make_store(self, tmp_path: Path):
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.storage import ResultStore
+        import dataclasses
+        get_settings.cache_clear()
+        s = get_settings()
+        s = dataclasses.replace(
+            s,
+            data_dir=tmp_path,
+            database_path=tmp_path / "test.db",
+            output_dir=tmp_path,
+        )
+        return ResultStore(s)
+
+    def test_field_stats_written_on_persist(self, tmp_path):
+        """persist() with field_sources/field_confidence writes one row per field."""
+        from src.doc_ai.schemas import ValidationCheck
+        store = self._make_store(tmp_path)
+        check = ValidationCheck(field="vendor_name", status="pass", message="ok")
+        store.persist(
+            source_file_name="inv.pdf",
+            extracted_data={
+                "document_type": "invoice",
+                "vendor_name": "Acme",
+                "invoice_number": None,
+                "invoice_date": "2025-01-01",
+                "total_amount": "100.00",
+            },
+            validation_checks=[check],
+            extraction_trace=["step 1"],
+            content_hash="abc",
+            original_filename="inv.pdf",
+            field_sources={"vendor_name": "Template", "invoice_date": "Rule-based"},
+            field_confidence={"vendor_name": 0.92, "invoice_date": 0.72},
+        )
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "test.db"))
+        rows = conn.execute(
+            "SELECT field_name, is_null, extraction_source, confidence "
+            "FROM field_stats WHERE source_file='inv.pdf' ORDER BY field_name"
+        ).fetchall()
+        conn.close()
+        by_field = {r[0]: r for r in rows}
+        assert "vendor_name" in by_field
+        assert by_field["vendor_name"][1] == 0         # is_null=0 (extracted)
+        assert by_field["vendor_name"][2] == "Template"
+        assert abs(by_field["vendor_name"][3] - 0.92) < 0.001
+        assert "invoice_number" in by_field
+        assert by_field["invoice_number"][1] == 1      # is_null=1 (missing)
+        assert by_field["invoice_number"][3] is None   # confidence NULL when missing
+
+    def test_field_stats_replaced_on_repersist(self, tmp_path):
+        """Re-persisting the same source_file replaces field_stats rows, not duplicates them."""
+        from src.doc_ai.schemas import ValidationCheck
+        store = self._make_store(tmp_path)
+        check = ValidationCheck(field="vendor_name", status="pass", message="ok")
+        for _ in range(2):
+            store.persist(
+                source_file_name="inv.pdf",
+                extracted_data={"document_type": "invoice", "vendor_name": "Acme"},
+                validation_checks=[check],
+                extraction_trace=["step 1"],
+                content_hash="abc",
+                original_filename="inv.pdf",
+            )
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "test.db"))
+        count = conn.execute(
+            "SELECT COUNT(*) FROM field_stats WHERE source_file='inv.pdf'"
+        ).fetchone()[0]
+        conn.close()
+        from src.doc_ai.schema_config import FIELD_CATALOG
+        expected = len(FIELD_CATALOG["invoice"])
+        assert count == expected, f"Expected {expected} rows, got {count} (duplicate rows written)"
