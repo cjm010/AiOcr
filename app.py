@@ -748,7 +748,8 @@ def render_single_tab(
             st.session_state["last_result"] = result
             st.session_state["last_uploaded_name"] = uploaded_file.name
             st.session_state["last_processed_signature"] = current_upload_signature
-            st.session_state.docs_processed_total += 1
+            if not result.summary.get("duplicate"):
+                st.session_state.docs_processed_total += 1
 
             if _is_bulk_auto_approvable(result, confidence_threshold, apply_confidence_gate=True):
                 reviewed = pipeline.finalize_review(
@@ -783,31 +784,32 @@ def render_single_tab(
         for error in result.errors:
             st.write(f"- {error}")
 
-    doc_col, review_col = st.columns([1.1, 1])
+    if not result.summary.get("duplicate"):
+        doc_col, review_col = st.columns([1.1, 1])
 
-    with doc_col:
-        st.subheader("Source document")
-        render_pdf_preview(result.upload_path)
-        st.subheader("Copyable parsed text")
-        st.caption("If the embedded PDF viewer does not let you copy text easily, use this parsed text instead.")
-        st.text_area("Parsed document text", result.parsed_text[:20000], height=320)
+        with doc_col:
+            st.subheader("Source document")
+            render_pdf_preview(result.upload_path)
+            st.subheader("Copyable parsed text")
+            st.caption("If the embedded PDF viewer does not let you copy text easily, use this parsed text instead.")
+            st.text_area("Parsed document text", result.parsed_text[:20000], height=320)
 
-    with review_col:
-        st.subheader("Current extracted fields")
-        render_completeness_bar(result.extracted_data, pipeline._settings)
-        st.json(result.extracted_data)
-        st.subheader("Validation report")
-        validation_df = pd.DataFrame(result.validation_results)
-        if validation_df.empty:
-            st.info("No validation checks were produced.")
-        else:
-            st.dataframe(validation_df, use_container_width=True)
-        already_approved = result.summary.get("approved_for_future_matching", False)
-        if already_approved:
-            with st.expander("Correct extracted fields", expanded=False):
+        with review_col:
+            st.subheader("Current extracted fields")
+            render_completeness_bar(result.extracted_data, pipeline._settings)
+            st.json(result.extracted_data)
+            st.subheader("Validation report")
+            validation_df = pd.DataFrame(result.validation_results)
+            if validation_df.empty:
+                st.info("No validation checks were produced.")
+            else:
+                st.dataframe(validation_df, use_container_width=True)
+            already_approved = result.summary.get("approved_for_future_matching", False)
+            if already_approved:
+                with st.expander("Correct extracted fields", expanded=False):
+                    render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
+            else:
                 render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
-        else:
-            render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
 
     st.subheader("Agent trace")
     field_sources = getattr(result, "field_sources", {})
