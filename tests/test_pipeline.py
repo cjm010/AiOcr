@@ -2764,3 +2764,101 @@ class TestFirstLineVendorNameHeuristic:
         )
         result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
         assert result["vendor_name"] == "Greenleaf Office Supplies"
+
+
+# ---------------------------------------------------------------------------
+# Business doc: OCR single-line KPI and pipe-value filtering
+# ---------------------------------------------------------------------------
+
+class TestBusinessDocOcrKpiAndPipeFilter:
+    """Regressions for image-only business_doc documents processed via Tesseract.
+
+    Two issues observed when OCR flattens the KPI table to one line and uses
+    pipe characters as visual column separators:
+    1. KPIs came back empty because the multi-line parser found no rows.
+    2. approved_by was set to '|' (a bare pipe separator with no name).
+    """
+
+    _KPI_LINE = (
+        "Revenue ($M) 51.93 41.14 +26% Strong "
+        "EBITDA Margin (%) 29.2 26.5 +2.7 pts On Track "
+        "Customer Retention (%) 93.4 89.3 +4.1% On Track "
+        "New Customer Acquisition 378 273 +105 Strong "
+        "Employee Satisfaction 84/100 79/100 +5 pts Strong"
+    )
+
+    def test_inline_kpi_parser_extracts_all_entries(self):
+        from src.doc_ai.extractors import _parse_kpis_inline
+        kpis = _parse_kpis_inline(self._KPI_LINE)
+        assert len(kpis) == 5
+        metrics = [k["metric"] for k in kpis]
+        assert "Revenue ($M)" in metrics
+        assert "EBITDA Margin (%)" in metrics
+        assert "Employee Satisfaction" in metrics
+
+    def test_inline_kpi_parser_strips_status_prefix(self):
+        """Status words like 'Strong' and 'On Track' must not leak into the next metric name."""
+        from src.doc_ai.extractors import _parse_kpis_inline
+        kpis = _parse_kpis_inline(self._KPI_LINE)
+        metrics = [k["metric"] for k in kpis]
+        for m in metrics:
+            assert not m.startswith("Strong"), f"Status leaked into metric: {m!r}"
+            assert not m.startswith("On Track"), f"Status leaked into metric: {m!r}"
+
+    def test_inline_kpi_values_correct(self):
+        from src.doc_ai.extractors import _parse_kpis_inline
+        kpis = _parse_kpis_inline(self._KPI_LINE)
+        revenue = next(k for k in kpis if k["metric"] == "Revenue ($M)")
+        assert revenue["current_period"] == "51.93"
+        assert revenue["prior_period"] == "41.14"
+        assert revenue["variance"] == "+26%"
+
+    def test_full_extractor_parses_kpis_from_ocr_single_line(self):
+        """End-to-end: extractor must return KPIs when OCR collapses the table."""
+        from src.doc_ai.extractors import RuleBasedBusinessDocExtractor
+        from src.doc_ai.schemas import ParsedDocument
+        text = (
+            "Meridian Cloud Inc.\n"
+            "STRATEGIC INITIATIVE BRIEFING Period Ending: March 19, 2025\n"
+            "EXECUTIVE SUMMARY\nSome summary text.\n"
+            "KEY PERFORMANCE INDICATORS\n"
+            f"{self._KPI_LINE}\n"
+            "STRATEGIC RECOMMENDATIONS\n"
+            "1. Do something.\n"
+            "Prepared by: Kevin Mitchell Approved by: | Date: March 25, 2025\n"
+        )
+        doc = ParsedDocument(
+            file_name="bd.pdf", file_path=None,
+            raw_text=text,
+            sections=[l.strip() for l in text.splitlines() if l.strip()],
+            metadata={},
+        )
+        result = RuleBasedBusinessDocExtractor().extract(doc)
+        assert len(result["kpis"]) == 5, f"Expected 5 KPIs, got {result['kpis']}"
+
+    def test_pipe_value_not_stored_as_approved_by(self):
+        """approved_by must be None when the OCR value is just a pipe separator."""
+        from src.doc_ai.extractors import RuleBasedBusinessDocExtractor
+        from src.doc_ai.schemas import ParsedDocument
+        text = (
+            "Meridian Cloud Inc.\n"
+            "STRATEGIC INITIATIVE BRIEFING Period Ending: March 19, 2025\n"
+            "Prepared by: Kevin Mitchell Approved by: | Date: March 25, 2025\n"
+        )
+        doc = ParsedDocument(
+            file_name="bd.pdf", file_path=None,
+            raw_text=text,
+            sections=[l.strip() for l in text.splitlines() if l.strip()],
+            metadata={},
+        )
+        result = RuleBasedBusinessDocExtractor().extract(doc)
+        assert result.get("approved_by") != "|", "Pipe separator must not be stored as approved_by"
+
+    def test_split_multifield_skips_pipe_only_value(self):
+        """_split_multifield_value must not return values that contain no alphanumeric chars."""
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        result = _split_multifield_value(
+            "Prepared by: Kevin Mitchell Approved by: | Date: March 25, 2025"
+        )
+        assert "approved by" not in result, "Pipe-only value should be filtered out"
+        assert result.get("prepared by") == "Kevin Mitchell"

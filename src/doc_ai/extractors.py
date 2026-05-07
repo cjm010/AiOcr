@@ -369,6 +369,41 @@ class RuleBasedLabReportExtractor(BaseExtractor):
         return extracted
 
 
+# Matches one KPI entry on an inline (single-line) OCR row:
+# "MetricName CURRENT PRIOR +VARIANCE [status words]"
+_KPI_INLINE_RE = re.compile(
+    r"([A-Za-z][A-Za-z\s()%$]+?)"       # metric name (at least one letter start)
+    r"\s+([\d,./]+)"                      # current period value
+    r"\s+([\d,./]+)"                      # prior period value
+    r"\s+([+\-][\d,.%]+(?:\s*pts?)?)"    # variance (e.g. +26%, -2.7 pts)
+    r"(?=\s+[A-Za-z(]|\Z)",              # lookahead: next metric or end of string
+    re.IGNORECASE,
+)
+_KPI_STATUS_PREFIX = re.compile(
+    r"^(?:Strong|On\s+Track|Moderate|Weak|Below\s+Target|On\s+[Tt]arget)\s+",
+    re.IGNORECASE,
+)
+
+
+def _parse_kpis_inline(text: str) -> list[dict]:
+    """Parse KPI entries packed onto a single line (common in Tesseract OCR output).
+
+    OCR often collapses a multi-row KPI table into one long line like:
+      "Revenue ($M) 51.93 41.14 +26% Strong EBITDA Margin (%) 29.2 26.5 +2.7 pts ..."
+    """
+    kpis = []
+    for m in _KPI_INLINE_RE.finditer(text):
+        metric = _KPI_STATUS_PREFIX.sub("", m.group(1)).strip()
+        if metric:
+            kpis.append({
+                "metric": metric,
+                "current_period": m.group(2),
+                "prior_period": m.group(3),
+                "variance": m.group(4).strip(),
+            })
+    return kpis
+
+
 class RuleBasedBusinessDocExtractor(BaseExtractor):
     FIELD_PATTERNS = {
         "report_period": [
@@ -470,6 +505,14 @@ class RuleBasedBusinessDocExtractor(BaseExtractor):
                 except (ValueError, IndexError):
                     pass
             j += 1
+
+        # Fallback: OCR often collapses the KPI table onto a single line.
+        # If multi-line parsing found nothing but the section header was present,
+        # try the inline parser on each collected line.
+        if not kpis and kpi_lines:
+            for kline in kpi_lines:
+                kpis.extend(_parse_kpis_inline(kline))
+
         extracted["kpis"] = kpis
 
         # Numbered recommendations — may all appear on a single long line

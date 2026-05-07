@@ -448,7 +448,9 @@ def _split_multifield_value(text: str) -> dict[str, str]:
     for i, (_, val_start, norm_label) in enumerate(segments):
         val_end = segments[i + 1][0] if i + 1 < len(segments) else len(text)
         value = text[val_start:val_end].strip()
-        if value:
+        # Skip values that contain no alphanumeric characters (e.g. bare "|" separators
+        # that appear in OCR output between label columns).
+        if value and re.search(r"[a-zA-Z0-9]", value):
             result[norm_label] = value
 
     return result
