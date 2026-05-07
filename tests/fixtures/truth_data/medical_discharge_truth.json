@@ -1,0 +1,129 @@
+{
+  "medical_discharge_format_a_full.pdf": {
+    "document_type": "medical_discharge",
+    "patient_name": "Margaret Johnson",
+    "patient_dob": "1962-08-14",
+    "patient_id": "MRN-445821",
+    "admission_date": "2024-02-20",
+    "discharge_date": "2024-02-27",
+    "attending_physician": "Dr. Richard Patel",
+    "hospital_name": "Riverside General Hospital",
+    "primary_diagnosis": "Community-acquired pneumonia (J18.9)",
+    "secondary_diagnoses": [
+      "Type 2 diabetes mellitus (E11.9)",
+      "Essential hypertension (I10)"
+    ],
+    "procedures": [
+      "Chest X-ray",
+      "Sputum culture and sensitivity",
+      "IV antibiotic therapy"
+    ],
+    "medications": [
+      "Azithromycin 500mg daily x 5 days",
+      "Metformin 1000mg twice daily",
+      "Lisinopril 10mg daily",
+      "Albuterol inhaler PRN"
+    ],
+    "discharge_condition": "Stable, improved",
+    "follow_up_instructions": "Follow up with primary care physician in 7 days. Return to ED if fever exceeds 101.5 F or breathing worsens."
+  },
+  "medical_discharge_format_a_similar.pdf": {
+    "document_type": "medical_discharge",
+    "patient_name": "Harold Reyes",
+    "patient_dob": "1948-11-03",
+    "patient_id": "MRN-519307",
+    "admission_date": "2024-04-08",
+    "discharge_date": "2024-04-14",
+    "attending_physician": "Dr. Richard Patel",
+    "hospital_name": "Riverside General Hospital",
+    "primary_diagnosis": "Acute exacerbation of COPD (J44.1)",
+    "secondary_diagnoses": [
+      "Chronic heart failure (I50.9)",
+      "Atrial fibrillation (I48.91)"
+    ],
+    "procedures": [
+      "Pulmonary function tests",
+      "Echocardiogram",
+      "Bronchodilator therapy"
+    ],
+    "medications": [
+      "Tiotropium 18mcg inhaled daily",
+      "Ipratropium/albuterol nebulization q4h",
+      "Furosemide 40mg daily",
+      "Warfarin 5mg daily",
+      "Prednisone 40mg taper"
+    ],
+    "discharge_condition": "Stable",
+    "follow_up_instructions": "Pulmonology follow-up in 2 weeks. INR check in 3 days. Monitor weight daily."
+  },
+  "medical_discharge_format_a_missing.pdf": {
+    "document_type": "medical_discharge",
+    "patient_name": "Clara Hutchins",
+    "patient_dob": "1975-03-29",
+    "patient_id": "MRN-632104",
+    "admission_date": "2024-06-01",
+    "discharge_date": null,
+    "attending_physician": "Dr. Susan Nakamura",
+    "hospital_name": "Riverside General Hospital",
+    "primary_diagnosis": null,
+    "secondary_diagnoses": [
+      "Anxiety disorder (F41.1)"
+    ],
+    "procedures": [
+      "Blood panel",
+      "EKG"
+    ],
+    "medications": null,
+    "discharge_condition": "Condition under review",
+    "follow_up_instructions": "Schedule outpatient evaluation within 5 business days."
+  },
+  "medical_discharge_format_b_full.pdf": {
+    "document_type": "medical_discharge",
+    "patient_name": "Thomas Weston",
+    "patient_dob": "1955-06-18",
+    "patient_id": "MRN-708234",
+    "admission_date": "2024-03-12",
+    "discharge_date": "2024-03-19",
+    "attending_physician": "Dr. Elena Vasquez",
+    "hospital_name": "Summit Medical Center",
+    "primary_diagnosis": "Acute myocardial infarction (I21.9)",
+    "secondary_diagnoses": [
+      "Hyperlipidemia (E78.5)",
+      "Obesity (E66.9)"
+    ],
+    "procedures": [
+      "Coronary angiography",
+      "Percutaneous coronary intervention",
+      "Cardiac monitoring"
+    ],
+    "medications": [
+      "Aspirin 81mg daily",
+      "Clopidogrel 75mg daily",
+      "Atorvastatin 80mg daily",
+      "Metoprolol 25mg twice daily"
+    ],
+    "discharge_condition": "Stable, improved",
+    "follow_up_instructions": "Cardiology follow-up in 5 days. Cardiac rehab enrollment within 2 weeks."
+  },
+  "medical_discharge_format_b_missing.pdf": {
+    "document_type": "medical_discharge",
+    "patient_name": "Rosa Delgado",
+    "patient_dob": "1983-12-07",
+    "patient_id": "MRN-891456",
+    "admission_date": "2024-08-22",
+    "discharge_date": null,
+    "attending_physician": "Dr. James Thornton",
+    "hospital_name": "Summit Medical Center",
+    "primary_diagnosis": null,
+    "secondary_diagnoses": [
+      "Migraine (G43.909)"
+    ],
+    "procedures": [
+      "MRI Brain",
+      "Lumbar puncture"
+    ],
+    "medications": null,
+    "discharge_condition": "Pending specialist review",
+    "follow_up_instructions": "Neurology consultation within 48 hours."
+  }
+}

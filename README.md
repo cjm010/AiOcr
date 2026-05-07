@@ -222,6 +222,8 @@ $env:APP_ENV="dev"
 python -m streamlit run app.py
 ```
 
+> **Note on OCR:** Processing scanned or image-only PDFs requires Tesseract installed on your machine (see [Supported File Formats](#supported-file-formats) below). If you don't want to install Tesseract locally, use Docker (Option B) instead — it bundles Tesseract automatically.
+
 If you want to use `llm-assisted` mode, you can either:
 
 - enter your provider API key and choose a model directly in the Streamlit sidebar, or
@@ -306,10 +308,19 @@ The app will be accessible at `http://<your-ec2-ip>:8501`.
 
 ## Supported File Formats
 
-- `.pdf` — text-based and scanned (OCR fallback via Tesseract)
+- `.pdf` — text-based and scanned (OCR fallback via Tesseract; see note below)
 - `.txt`
 - `.md`
 - `.json`
+
+> **Scanned / image-only PDFs:** Text-based PDFs are parsed automatically. For PDFs that contain only scanned images (no embedded text), the app falls back to Tesseract OCR.
+> - **Docker (Option B):** Tesseract is bundled in the Docker image — no extra install needed.
+> - **Local Python (Option A):** Tesseract must be installed separately on the host machine.
+>   - Windows: `winget install UB-Mannheim.TesseractOCR`
+>   - Linux: `apt-get install tesseract-ocr`
+>   - macOS: `brew install tesseract`
+>
+>   If Tesseract is not installed and you upload a scanned PDF, the app will display a clear error message with install instructions. Switch to Docker to avoid this requirement entirely.
 
 ## Extraction Modes
 

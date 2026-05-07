@@ -372,10 +372,12 @@ def render_review_form(
                 label_visibility="collapsed",
             )
 
+        already_approved = result.summary.get("approved_for_future_matching", False)
         approve_for_future_matching = st.checkbox(
-            "Approve this reviewed result for future matching",
-            value=True,
-            help="If checked, the reviewed values will be saved as a stronger template for similar future documents.",
+            "Approve corrected result for future matching",
+            value=not already_approved,
+            help="If checked, the corrected values will be saved as a template for similar future documents. "
+                 "Leave unchecked if the document was already auto-approved and you are making minor fixes only.",
         )
 
         submitted = st.form_submit_button("Save reviewed result", type="primary")
@@ -396,7 +398,13 @@ def render_review_form(
             original_extracted=result.extracted_data,
         )
         st.session_state["last_result"] = reviewed_result
-        st.session_state.manual_corrections_total += 1
+        has_manual_edits = any(
+            s == "Manual" for s in reviewed_result.field_sources.values()
+        )
+        if has_manual_edits:
+            st.session_state.manual_corrections_total += 1
+        if approve_for_future_matching:
+            st.session_state.approvals_total += 1
         st.success("Reviewed values saved. The outputs and validation report have been updated.")
         st.rerun()
 
@@ -740,9 +748,10 @@ def render_single_tab(
             st.session_state["last_result"] = result
             st.session_state["last_uploaded_name"] = uploaded_file.name
             st.session_state["last_processed_signature"] = current_upload_signature
-            st.session_state.docs_processed_total += 1
+            if not result.summary.get("duplicate"):
+                st.session_state.docs_processed_total += 1
 
-            if auto_approve and _is_bulk_auto_approvable(result, confidence_threshold, apply_confidence_gate=True):
+            if _is_bulk_auto_approvable(result, confidence_threshold, apply_confidence_gate=True):
                 reviewed = pipeline.finalize_review(
                     source_file=result.source_file,
                     upload_path=result.upload_path,
@@ -752,6 +761,7 @@ def render_single_tab(
                     learn_from_upload=learn_from_upload,
                     approve_for_future_matching=True,
                     content_hash=result.content_hash,
+                    original_extracted=result.extracted_data,
                 )
                 st.session_state["last_result"] = reviewed
                 st.session_state.approvals_total += 1
@@ -774,27 +784,32 @@ def render_single_tab(
         for error in result.errors:
             st.write(f"- {error}")
 
-    doc_col, review_col = st.columns([1.1, 1])
+    if not result.summary.get("duplicate"):
+        doc_col, review_col = st.columns([1.1, 1])
 
-    with doc_col:
-        st.subheader("Source document")
-        render_pdf_preview(result.upload_path)
-        st.subheader("Copyable parsed text")
-        st.caption("If the embedded PDF viewer does not let you copy text easily, use this parsed text instead.")
-        st.text_area("Parsed document text", result.parsed_text[:20000], height=320)
+        with doc_col:
+            st.subheader("Source document")
+            render_pdf_preview(result.upload_path)
+            st.subheader("Copyable parsed text")
+            st.caption("If the embedded PDF viewer does not let you copy text easily, use this parsed text instead.")
+            st.text_area("Parsed document text", result.parsed_text[:20000], height=320)
 
-    with review_col:
-        st.subheader("Current extracted fields")
-        render_completeness_bar(result.extracted_data, pipeline._settings)
-        st.json(result.extracted_data)
-        render_approval_actions(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
-        st.subheader("Validation report")
-        validation_df = pd.DataFrame(result.validation_results)
-        if validation_df.empty:
-            st.info("No validation checks were produced.")
-        else:
-            st.dataframe(validation_df, use_container_width=True)
-        render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
+        with review_col:
+            st.subheader("Current extracted fields")
+            render_completeness_bar(result.extracted_data, pipeline._settings)
+            st.json(result.extracted_data)
+            st.subheader("Validation report")
+            validation_df = pd.DataFrame(result.validation_results)
+            if validation_df.empty:
+                st.info("No validation checks were produced.")
+            else:
+                st.dataframe(validation_df, use_container_width=True)
+            already_approved = result.summary.get("approved_for_future_matching", False)
+            if already_approved:
+                with st.expander("Correct extracted fields", expanded=False):
+                    render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
+            else:
+                render_review_form(pipeline, result, extraction_mode=extraction_mode, learn_from_upload=learn_from_upload)
 
     st.subheader("Agent trace")
     field_sources = getattr(result, "field_sources", {})
@@ -826,6 +841,89 @@ def render_single_tab(
                 data=json.dumps(result.extracted_data, indent=2),
                 file_name=path.name,
                 mime="application/json",
+            )
+
+
+def _render_result_detail(result, pipeline: DocumentPipeline) -> None:
+    """Read-only detail panel for a single bulk-processed document."""
+    summary = result.summary
+    doc_type = result.extracted_data.get("document_type", "invoice")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Extraction Mode", summary.get("extraction_mode", "—"))
+    proc_time = summary.get("processing_time_s")
+    col2.metric("Processing Time", f"{proc_time}s" if proc_time is not None else "—")
+    col3.metric("Document Type", doc_type.replace("_", " ").title())
+
+    if result.errors:
+        st.error("Pipeline completed with errors:")
+        for err in result.errors:
+            st.write(f"- {err}")
+
+    render_completeness_bar(result.extracted_data, pipeline._settings)
+
+    left, right = st.columns([1, 1])
+
+    with left:
+        st.subheader("Extracted fields")
+        field_order, _, _ = _resolve_schema_fields(pipeline._settings.data_dir, doc_type)
+        field_confidence = getattr(result, "field_confidence", {})
+        field_sources = getattr(result, "field_sources", {})
+        field_rows = []
+        for f in field_order:
+            val = result.extracted_data.get(f)
+            source = field_sources.get(f, "—")
+            conf = field_confidence.get(f)
+            field_rows.append({
+                "Field": f.replace("_", " ").title(),
+                "Value": str(val) if val is not None else "—",
+                "Source": source,
+                "Confidence": f"{round(conf * 100)}%" if conf is not None else "—",
+            })
+        if field_rows:
+            st.dataframe(pd.DataFrame(field_rows), hide_index=True, use_container_width=True)
+
+        list_fields = LIST_FIELDS_BY_TYPE.get(doc_type, [])
+        for lf in list_fields:
+            items = result.extracted_data.get(lf)
+            if items:
+                st.markdown(f"**{lf.replace('_', ' ').title()}**")
+                st.json(items)
+
+    with right:
+        st.subheader("Validation report")
+        validation_df = pd.DataFrame(result.validation_results)
+        if validation_df.empty:
+            st.info("No validation checks recorded.")
+        else:
+            st.dataframe(validation_df, hide_index=True, use_container_width=True)
+
+        st.subheader("Agent trace")
+        if field_sources:
+            source_df = pd.DataFrame(
+                [{"Field": k.replace("_", " ").title(), "Method": v}
+                 for k, v in sorted(field_sources.items())]
+            )
+            st.dataframe(source_df, hide_index=True, use_container_width=True)
+        if result.extraction_trace:
+            for step in result.extraction_trace:
+                st.write(f"- {step}")
+        else:
+            st.info("No extraction trace recorded.")
+
+    with st.expander("Source document & parsed text", expanded=False):
+        preview_col, text_col = st.columns([1, 1])
+        with preview_col:
+            render_pdf_preview(result.upload_path)
+        with text_col:
+            st.caption("Parsed text")
+            safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", result.source_file)
+            st.text_area(
+                "Parsed text",
+                result.parsed_text[:20000],
+                height=400,
+                key=f"detail_text_{safe_key}",
+                label_visibility="collapsed",
             )
 
 
@@ -875,6 +973,14 @@ def _render_bulk_results(
             "Content Hash": r.content_hash,
         }
 
+    # Map each summary-table row index → its PipelineResult (None for dup/fail rows).
+    result_objs = (
+        list(approved)
+        + list(flagged)
+        + [None] * len(duplicates)
+        + [None] * len(failures)
+    )
+
     rows = (
         [_summary_row(r, "auto-approved") for r in approved]
         + [_summary_row(r, "needs review") for r in flagged]
@@ -883,14 +989,33 @@ def _render_bulk_results(
     )
 
     summary_df = pd.DataFrame(rows)
-    with st.expander("Batch summary table", expanded=True):
-        st.dataframe(summary_df, use_container_width=True)
+    with st.expander("Batch summary table — click a row to inspect", expanded=True):
+        table_event = st.dataframe(
+            summary_df,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="bulk_summary_selection",
+        )
         st.download_button(
             "Export summary as CSV",
             data=summary_df.to_csv(index=False),
             file_name="bulk_upload_summary.csv",
             mime="text/csv",
         )
+
+    # Detail panel — shown when the user clicks a row in the summary table.
+    selected_rows = table_event.selection.rows if hasattr(table_event, "selection") else []
+    if selected_rows:
+        row_idx = selected_rows[0]
+        selected_result = result_objs[row_idx] if row_idx < len(result_objs) else None
+        selected_filename = rows[row_idx]["File"] if row_idx < len(rows) else "—"
+        st.divider()
+        st.subheader(f"Document detail: {selected_filename}")
+        if selected_result is None:
+            st.info("Detailed extraction data is not available for duplicate or failed documents.")
+        else:
+            _render_result_detail(selected_result, pipeline)
 
     if not flagged:
         st.success("All documents passed validation and have been auto-approved.")
@@ -995,6 +1120,11 @@ def _render_bulk_results(
             content_hash=current.content_hash,
             original_extracted=current.extracted_data,
         )
+        has_manual_edits = any(s == "Manual" for s in reviewed.field_sources.values())
+        if has_manual_edits:
+            st.session_state.manual_corrections_total += 1
+        if approve_future:
+            st.session_state.approvals_total += 1
         st.session_state["bulk_reviewed"].append(reviewed)
         st.session_state["bulk_review_index"] = review_index + 1
         st.rerun()
@@ -1090,7 +1220,20 @@ def render_bulk_tab(
             if item_result.get("status") in ("duplicate", "failed"):
                 pass  # duplicates and hard failures are excluded from review queue
             elif _is_bulk_auto_approvable(item_result["_result_obj"], confidence_threshold, apply_confidence_gate=auto_approve):
-                approved.append(item_result["_result_obj"])
+                result_obj = item_result["_result_obj"]
+                reviewed = pipeline.finalize_review(
+                    source_file=result_obj.source_file,
+                    upload_path=result_obj.upload_path,
+                    parsed_text=result_obj.parsed_text,
+                    corrected_data=result_obj.extracted_data,
+                    extraction_mode=extraction_mode,
+                    learn_from_upload=learn_from_upload,
+                    approve_for_future_matching=True,
+                    content_hash=result_obj.content_hash,
+                    original_extracted=result_obj.extracted_data,
+                )
+                approved.append(reviewed)
+                st.session_state.approvals_total += 1
             else:
                 flagged.append(item_result["_result_obj"])
         processed_count = sum(1 for r in raw_results if r.get("status") not in ("failed", "duplicate"))

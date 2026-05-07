@@ -10,7 +10,7 @@ from typing import Any
 import pandas as pd
 
 from .config import Settings
-from .schema_config import SchemaConfig, TABLE_NAMES
+from .schema_config import FIELD_CATALOG, SchemaConfig, TABLE_NAMES
 from .schemas import ValidationCheck
 
 _DB_WRITE_LOCK = threading.Lock()
@@ -53,6 +53,15 @@ class ResultStore:
                     message TEXT,
                     logged_at TEXT DEFAULT (datetime('now'))
                 );
+                CREATE TABLE IF NOT EXISTS field_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_file TEXT NOT NULL,
+                    document_type TEXT NOT NULL,
+                    field_name TEXT NOT NULL,
+                    is_null INTEGER NOT NULL,
+                    extraction_source TEXT,
+                    confidence REAL
+                );
             """)
             conn.commit()
         except sqlite3.OperationalError:
@@ -76,6 +85,7 @@ class ResultStore:
             new_columns = {
                 # Core / invoice
                 "content_hash": "TEXT DEFAULT ''",
+                "semantic_fingerprint": "TEXT DEFAULT ''",
                 "original_filename": "TEXT DEFAULT ''",
                 "currency": "TEXT",
                 "shipping_handling": "REAL",
@@ -145,6 +155,15 @@ class ResultStore:
                     severity TEXT DEFAULT 'error',
                     message TEXT,
                     logged_at TEXT DEFAULT (datetime('now'))
+                );
+                CREATE TABLE IF NOT EXISTS field_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_file TEXT NOT NULL,
+                    document_type TEXT NOT NULL,
+                    field_name TEXT NOT NULL,
+                    is_null INTEGER NOT NULL,
+                    extraction_source TEXT,
+                    confidence REAL
                 );
             """)
             conn.commit()
@@ -244,6 +263,28 @@ class ResultStore:
         finally:
             conn.close()
 
+    def has_been_processed_by_fingerprint(self, semantic_fingerprint: str) -> bool:
+        """Return True if a document with the same semantic fingerprint was already stored.
+
+        Used as a secondary dedup gate after extraction to catch the same document
+        processed in two different formats (e.g. scanned image-only vs. text-based PDF).
+        Never matches on empty fingerprint.
+        """
+        if not semantic_fingerprint or not Path(self._settings.database_path).exists():
+            return False
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                "SELECT 1 FROM document_results "
+                "WHERE semantic_fingerprint = ? AND semantic_fingerprint != '' LIMIT 1",
+                (semantic_fingerprint,),
+            )
+            return cursor.fetchone() is not None
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            conn.close()
+
     def persist(
         self,
         source_file_name: str,
@@ -252,6 +293,9 @@ class ResultStore:
         extraction_trace: list[str],
         content_hash: str = "",
         original_filename: str = "",
+        semantic_fingerprint: str = "",
+        field_sources: dict[str, str] | None = None,
+        field_confidence: dict[str, float] | None = None,
     ) -> dict[str, str]:
         stem = Path(source_file_name).stem
         json_path = self._settings.output_dir / f"{stem}.json"
@@ -268,6 +312,9 @@ class ResultStore:
             extraction_trace,
             content_hash=content_hash,
             original_filename=original_filename,
+            semantic_fingerprint=semantic_fingerprint,
+            field_sources=field_sources or {},
+            field_confidence=field_confidence or {},
         )
 
         return {
@@ -285,11 +332,17 @@ class ResultStore:
         extraction_trace: list[str],
         content_hash: str = "",
         original_filename: str = "",
+        semantic_fingerprint: str = "",
+        field_sources: dict[str, str] | None = None,
+        field_confidence: dict[str, float] | None = None,
     ) -> None:
         with _DB_WRITE_LOCK:
             self._write_sqlite_locked(
                 source_file_name, extracted_data, validation_checks,
                 extraction_trace, content_hash, original_filename,
+                semantic_fingerprint=semantic_fingerprint,
+                field_sources=field_sources or {},
+                field_confidence=field_confidence or {},
             )
 
     def _write_sqlite_locked(
@@ -300,12 +353,15 @@ class ResultStore:
         extraction_trace: list[str],
         content_hash: str = "",
         original_filename: str = "",
+        semantic_fingerprint: str = "",
+        field_sources: dict[str, str] | None = None,
+        field_confidence: dict[str, float] | None = None,
     ) -> None:
         conn = self._connect()
         try:
             # Delete any prior rows for this source_file so that finalize_review()
             # replaces the initial process_bytes() write rather than duplicating it.
-            for tbl in ("document_results", "validation_results", "extraction_traces"):
+            for tbl in ("document_results", "validation_results", "extraction_traces", "field_stats"):
                 try:
                     conn.execute(f"DELETE FROM {tbl} WHERE source_file = ?", (source_file_name,))
                 except Exception:
@@ -321,6 +377,7 @@ class ResultStore:
                         "source_file": source_file_name,
                         "original_filename": original_filename or source_file_name,
                         "content_hash": content_hash,
+                        "semantic_fingerprint": semantic_fingerprint,
                         **serialized,
                     }
                 ]
@@ -384,5 +441,26 @@ class ResultStore:
                 except sqlite3.OperationalError:
                     pass
                 pd.DataFrame([type_row]).to_sql(type_table, conn, if_exists="append", index=False)
+
+            # Write per-field stats
+            catalog_fields = FIELD_CATALOG.get(doc_type, [])
+            if catalog_fields:
+                stats_rows = []
+                for f in catalog_fields:
+                    key = f["key"]
+                    val = extracted_data.get(key)
+                    is_null = 1 if val in (None, "", []) else 0
+                    stats_rows.append({
+                        "source_file": source_file_name,
+                        "document_type": doc_type,
+                        "field_name": key,
+                        "is_null": is_null,
+                        "extraction_source": (field_sources or {}).get(key) if not is_null else None,
+                        "confidence": (field_confidence or {}).get(key) if not is_null else None,
+                    })
+                try:
+                    pd.DataFrame(stats_rows).to_sql("field_stats", conn, if_exists="append", index=False)
+                except Exception:
+                    pass
         finally:
             conn.close()
