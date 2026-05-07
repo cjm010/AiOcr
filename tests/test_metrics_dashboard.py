@@ -500,3 +500,31 @@ class TestFieldStatsMetrics:
         from src.doc_ai.schema_config import FIELD_CATALOG
         expected = len(FIELD_CATALOG["invoice"])
         assert count == expected, f"Expected {expected} rows, got {count} (duplicate rows written)"
+
+    def test_field_stats_not_written_for_semantic_duplicate(self, tmp_path):
+        """Semantic-fingerprint dedup early return must not write any field_stats rows."""
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.pipeline import DocumentPipeline
+        import dataclasses
+
+        get_settings.cache_clear()
+        s = get_settings()
+        s = dataclasses.replace(s, data_dir=tmp_path)
+        pipeline = DocumentPipeline(s)
+
+        text = (
+            "Acme Corp\nINVOICE\n"
+            "Invoice Number: INV-001\nInvoice Date: 2025-01-15\nTotal: $100.00\n"
+        )
+        # First upload — stored normally
+        pipeline.process_bytes("inv.txt", text.encode())
+        # Second upload — same key fields, slightly different bytes → semantic dup
+        pipeline.process_bytes("inv_copy.txt", (text + "\n").encode())
+
+        import sqlite3
+        conn = sqlite3.connect(str(s.database_path))
+        count = conn.execute(
+            "SELECT COUNT(*) FROM field_stats WHERE source_file='inv_copy.txt'"
+        ).fetchone()[0]
+        conn.close()
+        assert count == 0, "Semantic duplicate must not write field_stats rows"

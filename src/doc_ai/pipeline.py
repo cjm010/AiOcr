@@ -285,6 +285,11 @@ class DocumentPipeline:
                 needs_review=False,
             )
 
+        field_sources = self._build_field_sources(extracted_data, extraction_trace)
+        field_confidence = self._compute_field_confidence(
+            extracted_data, validation_checks, extraction_trace, field_sources
+        )
+
         output_files = self._store.persist(
             saved_path.name,
             extracted_data,
@@ -293,6 +298,8 @@ class DocumentPipeline:
             content_hash=content_hash,
             original_filename=file_name,
             semantic_fingerprint=semantic_fingerprint,
+            field_sources=field_sources,
+            field_confidence=field_confidence,
         )
 
         summary = {
@@ -308,11 +315,6 @@ class DocumentPipeline:
             "outputs_written": list(output_files.keys()),
             "needs_review": needs_review,
         }
-
-        field_sources = self._build_field_sources(extracted_data, extraction_trace)
-        field_confidence = self._compute_field_confidence(
-            extracted_data, validation_checks, extraction_trace, field_sources
-        )
 
         return PipelineResult(
             source_file=saved_path.name,
