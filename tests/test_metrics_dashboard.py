@@ -475,6 +475,7 @@ class TestFieldStatsMetrics:
         assert "invoice_number" in by_field
         assert by_field["invoice_number"][1] == 1      # is_null=1 (missing)
         assert by_field["invoice_number"][3] is None   # confidence NULL when missing
+        assert by_field["invoice_number"][2] is None   # extraction_source NULL when missing
 
     def test_field_stats_replaced_on_repersist(self, tmp_path):
         """Re-persisting the same source_file replaces field_stats rows, not duplicates them."""
