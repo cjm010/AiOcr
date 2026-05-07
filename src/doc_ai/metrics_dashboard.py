@@ -268,17 +268,27 @@ def render_metrics_dashboard(settings) -> None:
 
         cols = st.columns(5)
         cols[0].metric("Total Documents Processed", f"{total:,}")
-        cols[1].metric("Passed by Template", f"{template:,}")
+        cols[1].metric(
+            "Passed by Template",
+            f"{template:,}",
+            help="Subset of total — a document can appear here AND in 'Fell Back to LLM'. Does not add up to total.",
+        )
         cols[2].metric(
             "Fell Back to LLM",
             f"{llm:,}",
-            help="Documents whose extraction trace mentions an LLM provider.",
+            help="Subset of total — a document can appear here AND in 'Passed by Template'. Does not add up to total.",
         )
         cols[3].metric("Manually Corrected", f"{manual:,}")
         cols[4].metric(
             "Records Created",
             f"{records:,}",
             help="Rows across all per-type structured tables (invoices, discharge_summaries, ndas, lab_reports, business_docs).",
+        )
+
+        st.caption(
+            ":information_source: **Passed by Template** and **Fell Back to LLM** are independent "
+            "subsets of the total — one document can be counted in both. They will not add up to "
+            "the total."
         )
 
         # Helpful coverage hints — these counts are a *subset* of total.
