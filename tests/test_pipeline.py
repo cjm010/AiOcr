@@ -1942,7 +1942,7 @@ class TestGetRequiredFields:
 
     def test_invoice_required_keys(self):
         from src.doc_ai.schema_config import get_required_fields
-        assert get_required_fields("invoice") == {"vendor_name", "invoice_number", "invoice_date", "total_amount"}
+        assert get_required_fields("invoice") == {"vendor_name", "invoice_number", "invoice_date", "total_amount", "line_items"}
 
     def test_nda_required_keys_match_actual_field_names(self):
         from src.doc_ai.schema_config import get_required_fields
@@ -1964,9 +1964,9 @@ class TestRequiredFieldPassesByDocType:
         from src.doc_ai.schemas import ValidationCheck
         return [ValidationCheck(field=f, status="pass", message="ok") for f in fields]
 
-    def test_invoice_requires_four_fields(self):
+    def test_invoice_requires_core_fields_including_line_items(self):
         from src.doc_ai.pipeline import DocumentPipeline
-        checks = self._make_checks(["vendor_name", "invoice_number", "invoice_date", "total_amount"])
+        checks = self._make_checks(["vendor_name", "invoice_number", "invoice_date", "total_amount", "line_items"])
         assert DocumentPipeline._has_required_field_passes(checks, "invoice") is True
 
     def test_invoice_fails_without_invoice_number(self):
@@ -2132,7 +2132,8 @@ class TestNeedsLlmFallback:
     def test_invoice_no_fallback_when_complete(self):
         from src.doc_ai.extractors import _needs_llm_fallback
         extracted = {"document_type": "invoice", "vendor_name": "Acme", "invoice_number": "INV-1",
-                     "invoice_date": "2026-01-01", "total_amount": 100.0}
+                     "invoice_date": "2026-01-01", "total_amount": 100.0,
+                     "line_items": '[{"description": "Widget", "amount": 100.0}]'}
         assert _needs_llm_fallback(extracted) is False
 
     def test_business_doc_no_fallback_with_company_name(self):
