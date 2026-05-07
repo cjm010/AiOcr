@@ -24,3 +24,6 @@ colab_data/
 Thumbs.db
 .vscode/
 .idea/
+
+# Superpowers planning artifacts (local only)
+docs/superpowers/

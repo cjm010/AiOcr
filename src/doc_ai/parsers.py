@@ -52,7 +52,9 @@ class DocumentParser:
             return text
 
         raise RuntimeError(
-            "Could not extract text from this PDF. The file may be corrupted or an unsupported format."
+            "Could not extract text from this PDF. If it is a scanned or image-only PDF, "
+            "install Tesseract OCR and the pypdfium2/Pillow/pytesseract Python packages to enable OCR. "
+            "Otherwise the file may be corrupted or an unsupported format."
         )
 
     def _parse_pdf_with_ocr(self, file_path: Path) -> str:
@@ -60,9 +62,21 @@ class DocumentParser:
         try:
             import pypdfium2 as pdfium
             import pytesseract
-            from PIL import Image
+            from PIL import Image  # noqa: F401
         except ImportError:
             return ""
+
+        # Verify the Tesseract binary is reachable before rasterizing any pages.
+        try:
+            pytesseract.get_tesseract_version()
+        except pytesseract.TesseractNotFoundError:
+            raise RuntimeError(
+                "Tesseract OCR is not installed or not on PATH. "
+                "This PDF appears to be image-only and requires Tesseract to extract text. "
+                "Easiest fix: run the app via Docker — Tesseract is already bundled in the image. "
+                "Local install: Windows → winget install UB-Mannheim.TesseractOCR, "
+                "Linux → apt-get install tesseract-ocr, macOS → brew install tesseract."
+            )
 
         try:
             doc = pdfium.PdfDocument(str(file_path))
@@ -78,6 +92,8 @@ class DocumentParser:
                     page_text = pytesseract.image_to_string(pil_image).strip()
                     if page_text:
                         pages.append(page_text)
+                except pytesseract.TesseractNotFoundError:
+                    raise
                 except Exception:
                     continue
         finally:

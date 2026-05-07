@@ -418,6 +418,44 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return round(dot / (mag_a * mag_b), 4)
 
 
+def _split_multifield_value(text: str) -> dict[str, str]:
+    """
+    Parse a text segment that packs multiple 'Label: value' pairs on one line,
+    e.g. 'Invoice #: INV-001 Date: Jan 1 2025 PO Number: PO-99'.
+
+    Returns {normalised_label: value} for every recognised label found.
+    Returns an empty dict when fewer than two known labels are detected so
+    single-pair rows fall through to the existing _row_to_pair logic.
+    """
+    if not text or text.count(":") < 2:
+        return {}
+
+    # Find every position where a known label immediately precedes ':'
+    # Sort labels longest-first so 'invoice number' wins over 'invoice'.
+    segments: list[tuple[int, int, str]] = []  # (label_start, value_start, norm_label)
+    for label in sorted(_LABEL_TO_FIELD, key=len, reverse=True):
+        pat = rf"(?:^|(?<=\s)){re.escape(label)}\s*:(?=\s|$)"
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            if not any(s[0] <= m.start() < s[1] for s in segments):
+                segments.append((m.start(), m.end(), _normalise_label(label)))
+
+    if len(segments) < 2:
+        return {}
+
+    segments.sort(key=lambda s: s[0])
+
+    result: dict[str, str] = {}
+    for i, (_, val_start, norm_label) in enumerate(segments):
+        val_end = segments[i + 1][0] if i + 1 < len(segments) else len(text)
+        value = text[val_start:val_end].strip()
+        # Skip values that contain no alphanumeric characters (e.g. bare "|" separators
+        # that appear in OCR output between label columns).
+        if value and re.search(r"[a-zA-Z0-9]", value):
+            result[norm_label] = value
+
+    return result
+
+
 def extract_fields_from_layout(layouts: list[SpatialLayout]) -> dict[str, Any]:
     """
     Extract key-value fields from spatial layout data across all pages.
@@ -428,9 +466,14 @@ def extract_fields_from_layout(layouts: list[SpatialLayout]) -> dict[str, Any]:
 
     for layout in layouts:
         for row in layout.rows:
-            pair = _row_to_pair(row)
-            if pair:
-                raw_pairs.setdefault(pair[0], pair[1])
+            multi = _split_multifield_value(row.text.strip())
+            if multi:
+                for lbl, val in multi.items():
+                    raw_pairs.setdefault(lbl, val)
+            else:
+                pair = _row_to_pair(row)
+                if pair:
+                    raw_pairs.setdefault(pair[0], pair[1])
 
         for label, value in _column_gap_pairs(layout.rows).items():
             raw_pairs.setdefault(label, value)
@@ -475,25 +518,29 @@ def build_spatial_anchors(
 
     # Pass 1: label-based anchors
     for row in layout.rows:
-        pair = _row_to_pair(row)
-        if not pair:
-            continue
-        raw_label, value = pair
-        field_name = _LABEL_TO_FIELD.get(raw_label)
-        if not field_name or field_name in seen_fields:
-            continue
-        if field_name not in extracted:
-            continue
-        ext_val = str(extracted[field_name]).strip()
-        if not ext_val or (ext_val.lower() not in value.lower() and value.lower() not in ext_val.lower()):
-            continue
-        anchors.append({
-            "field": field_name,
-            "label_text": raw_label,
-            "norm_x": layout.norm_x(row.x0),
-            "norm_y": layout.norm_y(row.top),
-        })
-        seen_fields.add(field_name)
+        # Multi-field rows (e.g. "Invoice #: INV-001 Date: Jan 1 PO Number: PO-9")
+        # need each sub-label handled individually; single-pair rows fall through.
+        row_pairs = _split_multifield_value(row.text.strip())
+        if not row_pairs:
+            pair = _row_to_pair(row)
+            if pair:
+                row_pairs = {pair[0]: pair[1]}
+        for raw_label, value in row_pairs.items():
+            field_name = _LABEL_TO_FIELD.get(raw_label)
+            if not field_name or field_name in seen_fields:
+                continue
+            if field_name not in extracted:
+                continue
+            ext_val = str(extracted[field_name]).strip()
+            if not ext_val or (ext_val.lower() not in value.lower() and value.lower() not in ext_val.lower()):
+                continue
+            anchors.append({
+                "field": field_name,
+                "label_text": raw_label,
+                "norm_x": layout.norm_x(row.x0),
+                "norm_y": layout.norm_y(row.top),
+            })
+            seen_fields.add(field_name)
 
     # Pass 2: value-scan for fields that weren't anchored by a label
     for field, value in extracted.items():
@@ -562,20 +609,24 @@ def extract_by_spatial_anchors(
             ny = layout.norm_y(row.top)
             if abs(nx - ax) > x_tol or abs(ny - ay) > y_tol:
                 continue
-            pair = _row_to_pair(row)
+            # Build per-label value map; handles rows with multiple "Label: v" pairs.
+            all_pairs = _split_multifield_value(row.text.strip())
+            if not all_pairs:
+                single = _row_to_pair(row)
+                if single:
+                    all_pairs = {single[0]: single[1]}
             # Exact label match
-            if pair and pair[0] == label_text:
-                extracted[field_name] = pair[1]
+            if label_text and label_text in all_pairs:
+                extracted[field_name] = all_pairs[label_text]
                 break
-            # Label text appears anywhere in the row
+            # Label text appears anywhere in the row (case-insensitive)
             if label_text and label_text.lower() in row.text.lower():
-                if pair:
-                    extracted[field_name] = pair[1]
-                    break
-            # Value-based anchor (no label): return value part if it's a pair,
-            # otherwise return the full row text so the position still wins.
+                val = all_pairs.get(label_text) or (next(iter(all_pairs.values())) if all_pairs else row.text.strip())
+                extracted[field_name] = val
+                break
+            # Value-based anchor (no label): return first pair value or raw row text.
             if not label_text:
-                extracted[field_name] = pair[1] if pair else row.text.strip()
+                extracted[field_name] = next(iter(all_pairs.values())) if all_pairs else row.text.strip()
                 break
 
     return extracted
