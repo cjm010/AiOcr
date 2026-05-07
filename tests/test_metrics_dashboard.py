@@ -148,7 +148,7 @@ def populated_db(tmp_path: Path) -> Path:
             ["Used `RuleBasedInvoiceExtractor` extraction."],
             processed_at=str(today),
         )
-        # Doc 7 — explicitly approved for future matching (counts as manual)
+        # Doc 7 — explicitly approved for future matching (approval only, NOT a manual correction)
         _add_doc(
             conn,
             "doc_approved_1.pdf",
@@ -192,11 +192,12 @@ class TestScalarMetrics:
         finally:
             conn.close()
 
-    def test_manual_corrections_includes_explicit_approval(self, populated_db: Path) -> None:
-        # doc_manual_1, doc_llm_then_manual, doc_approved_1 = 3 distinct
+    def test_manual_corrections_excludes_pure_approvals(self, populated_db: Path) -> None:
+        # doc_manual_1, doc_llm_then_manual = 2 distinct corrections
+        # doc_approved_1 has only an approval trace — must NOT be counted
         conn = sqlite3.connect(str(populated_db))
         try:
-            assert manual_corrections_count(conn) == 3
+            assert manual_corrections_count(conn) == 2
         finally:
             conn.close()
 
@@ -214,7 +215,7 @@ class TestScalarMetrics:
             "total_documents_processed": 7,
             "template_passed": 1,
             "llm_fallback": 3,
-            "manually_corrected": 3,
+            "manually_corrected": 2,
             "records_created": 7,
         }
 
@@ -342,6 +343,57 @@ class TestMetricsWithRealFixtures:
             f"Expected {len(available)} processed documents, got {count}"
         )
 
+    def test_approval_without_changes_not_counted_as_manual_correction(self, tmp_path):
+        """Approving a result without editing any fields must not increment manually_corrected.
+
+        Uses a corrected_data dict that simulates coerce_form_data output — numeric strings
+        like "3,445.00" become floats like 3445.0. That type difference must NOT be treated
+        as a user correction.
+        """
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        fixture = next((f for f in _FORMAT_A_FULL if f.exists()), None)
+        if fixture is None:
+            pytest.skip("No format_a_full fixture found")
+
+        pipeline = self._make_pipeline(tmp_path)
+        r = pipeline.process_bytes(fixture.name, fixture.read_bytes())
+
+        # Simulate coerce_form_data: convert numeric-looking string values to floats
+        coerced = {}
+        for k, v in r.extracted_data.items():
+            if isinstance(v, str) and k in {"subtotal", "tax_amount", "total_amount",
+                                             "tax", "shipping_handling"}:
+                try:
+                    coerced[k] = float(v.replace(",", "").replace("$", ""))
+                except (ValueError, AttributeError):
+                    coerced[k] = v
+            else:
+                coerced[k] = v
+
+        pipeline.finalize_review(
+            source_file=r.source_file,
+            upload_path=r.upload_path,
+            parsed_text=r.parsed_text,
+            corrected_data=coerced,
+            extraction_mode="adaptive-local",
+            learn_from_upload=True,
+            approve_for_future_matching=True,
+            content_hash=r.content_hash,
+            original_extracted=r.extracted_data,
+        )
+
+        from src.doc_ai.config import get_settings
+        db_path = get_settings().database_path
+        conn = sqlite3.connect(str(db_path))
+        try:
+            count = manual_corrections_count(conn)
+        finally:
+            conn.close()
+        assert count == 0, (
+            f"Expected 0 manual corrections after a no-change approval, got {count}"
+        )
+
     def test_records_created_matches_fixture_count(self, tmp_path):
         if not _PDF_LIBS_AVAILABLE:
             pytest.skip("PDF libraries not installed")
@@ -363,3 +415,173 @@ class TestMetricsWithRealFixtures:
         assert count == len(available), (
             f"Expected {len(available)} per-type records, got {count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# field_stats table — write path tests
+# ---------------------------------------------------------------------------
+
+
+class TestFieldStatsMetrics:
+    """Tests for field_stats table write path and query functions."""
+
+    def _make_store(self, tmp_path: Path):
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.storage import ResultStore
+        import dataclasses
+        get_settings.cache_clear()
+        s = get_settings()
+        s = dataclasses.replace(
+            s,
+            data_dir=tmp_path,
+            database_path=tmp_path / "test.db",
+            output_dir=tmp_path,
+        )
+        return ResultStore(s)
+
+    def _make_pipeline(self, tmp_path: Path):
+        """Return (pipeline, settings) fully isolated to tmp_path."""
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.pipeline import DocumentPipeline
+        import dataclasses
+        get_settings.cache_clear()
+        s = get_settings()
+        uploads = tmp_path / "uploads"
+        outputs = tmp_path / "outputs"
+        review_exports = tmp_path / "review_exports"
+        uploads.mkdir(exist_ok=True)
+        outputs.mkdir(exist_ok=True)
+        review_exports.mkdir(exist_ok=True)
+        s = dataclasses.replace(
+            s,
+            data_dir=tmp_path,
+            upload_dir=uploads,
+            output_dir=outputs,
+            review_export_dir=review_exports,
+            database_path=tmp_path / "document_results.db",
+            template_store_path=tmp_path / "learned_templates.json",
+            promoted_template_store_path=tmp_path / "promoted_templates.json",
+            bad_patterns_path=tmp_path / "bad_patterns.json",
+        )
+        return DocumentPipeline(s), s
+
+    def test_field_stats_written_on_persist(self, tmp_path):
+        """persist() with field_sources/field_confidence writes one row per field."""
+        from src.doc_ai.schemas import ValidationCheck
+        store = self._make_store(tmp_path)
+        check = ValidationCheck(field="vendor_name", status="pass", message="ok")
+        store.persist(
+            source_file_name="inv.pdf",
+            extracted_data={
+                "document_type": "invoice",
+                "vendor_name": "Acme",
+                "invoice_number": None,
+                "invoice_date": "2025-01-01",
+                "total_amount": "100.00",
+            },
+            validation_checks=[check],
+            extraction_trace=["step 1"],
+            content_hash="abc",
+            original_filename="inv.pdf",
+            field_sources={"vendor_name": "Template", "invoice_date": "Rule-based"},
+            field_confidence={"vendor_name": 0.92, "invoice_date": 0.72},
+        )
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "test.db"))
+        rows = conn.execute(
+            "SELECT field_name, is_null, extraction_source, confidence "
+            "FROM field_stats WHERE source_file='inv.pdf' ORDER BY field_name"
+        ).fetchall()
+        conn.close()
+        by_field = {r[0]: r for r in rows}
+        assert "vendor_name" in by_field
+        assert by_field["vendor_name"][1] == 0         # is_null=0 (extracted)
+        assert by_field["vendor_name"][2] == "Template"
+        assert abs(by_field["vendor_name"][3] - 0.92) < 0.001
+        assert "invoice_number" in by_field
+        assert by_field["invoice_number"][1] == 1      # is_null=1 (missing)
+        assert by_field["invoice_number"][3] is None   # confidence NULL when missing
+        assert by_field["invoice_number"][2] is None   # extraction_source NULL when missing
+
+    def test_field_stats_replaced_on_repersist(self, tmp_path):
+        """Re-persisting the same source_file replaces field_stats rows, not duplicates them."""
+        from src.doc_ai.schemas import ValidationCheck
+        store = self._make_store(tmp_path)
+        check = ValidationCheck(field="vendor_name", status="pass", message="ok")
+        for _ in range(2):
+            store.persist(
+                source_file_name="inv.pdf",
+                extracted_data={"document_type": "invoice", "vendor_name": "Acme"},
+                validation_checks=[check],
+                extraction_trace=["step 1"],
+                content_hash="abc",
+                original_filename="inv.pdf",
+            )
+        import sqlite3
+        conn = sqlite3.connect(str(tmp_path / "test.db"))
+        count = conn.execute(
+            "SELECT COUNT(*) FROM field_stats WHERE source_file='inv.pdf'"
+        ).fetchone()[0]
+        conn.close()
+        from src.doc_ai.schema_config import FIELD_CATALOG
+        expected = len(FIELD_CATALOG["invoice"])
+        assert count == expected, f"Expected {expected} rows, got {count} (duplicate rows written)"
+
+    def test_field_stats_not_written_for_semantic_duplicate(self, tmp_path):
+        """Semantic-fingerprint dedup early return must not write any field_stats rows."""
+        import sqlite3
+
+        pipeline, s = self._make_pipeline(tmp_path)
+
+        text = (
+            "Acme Corp\nINVOICE\n"
+            "Invoice Number: INV-001\nInvoice Date: 2025-01-15\nTotal: $100.00\n"
+        )
+        # First upload — stored normally
+        pipeline.process_bytes("inv.txt", text.encode())
+
+        conn = sqlite3.connect(str(s.database_path))
+        count_after_first = conn.execute("SELECT COUNT(*) FROM field_stats").fetchone()[0]
+        conn.close()
+
+        # Second upload — same key fields, slightly different bytes → semantic dup
+        pipeline.process_bytes("inv_copy.txt", (text + "\n").encode())
+
+        conn = sqlite3.connect(str(s.database_path))
+        count_after_dup = conn.execute("SELECT COUNT(*) FROM field_stats").fetchone()[0]
+        conn.close()
+
+        assert count_after_dup == count_after_first, (
+            "Semantic duplicate must not add new field_stats rows "
+            f"(was {count_after_first}, now {count_after_dup})"
+        )
+
+    def test_field_stats_have_source_and_confidence_after_process_bytes(self, tmp_path):
+        """After process_bytes, extracted fields must have non-null source and confidence in field_stats."""
+        import sqlite3
+
+        pipeline, s = self._make_pipeline(tmp_path)
+
+        text = (
+            "Acme Corp\nINVOICE\n"
+            "Invoice Number: INV-001\nInvoice Date: 2025-01-15\nTotal: $100.00\n"
+        )
+        pipeline.process_bytes("inv.txt", text.encode())
+
+        conn = sqlite3.connect(str(s.database_path))
+        rows = conn.execute(
+            "SELECT field_name, extraction_source, confidence "
+            "FROM field_stats WHERE is_null=0"
+        ).fetchall()
+        conn.close()
+
+        assert rows, "Expected at least one non-null field_stats row after processing"
+        for field_name, extraction_source, confidence in rows:
+            assert extraction_source is not None, (
+                f"extraction_source is None for field '{field_name}' — "
+                "field_sources must be passed to persist() before computation"
+            )
+            assert confidence is not None, (
+                f"confidence is None for field '{field_name}' — "
+                "field_confidence must be passed to persist() before computation"
+            )

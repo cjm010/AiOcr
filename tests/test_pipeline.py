@@ -1325,6 +1325,74 @@ class TestFixtureCorrectionFlow:
 
 
 # ---------------------------------------------------------------------------
+# field_sources after finalize_review
+# ---------------------------------------------------------------------------
+
+class TestFinalizeReviewFieldSources:
+    """finalize_review must preserve original source attribution for unchanged fields
+    and only mark actually-edited fields as Manual."""
+
+    def test_no_changes_preserves_original_sources(self, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        fixture = FIXTURES / "invoice_format_a_full.pdf"
+        if not fixture.exists():
+            pytest.skip("invoice_format_a_full.pdf not present")
+        pipeline = _make_pipeline(tmp_path)
+        r = pipeline.process_bytes(fixture.name, fixture.read_bytes())
+
+        reviewed = pipeline.finalize_review(
+            source_file=r.source_file,
+            upload_path=r.upload_path,
+            parsed_text=r.parsed_text,
+            corrected_data=dict(r.extracted_data),
+            extraction_mode="adaptive-local",
+            learn_from_upload=False,
+            approve_for_future_matching=False,
+            content_hash=r.content_hash,
+            original_extracted=r.extracted_data,
+        )
+        manual_fields = [f for f, s in reviewed.field_sources.items() if s == "Manual"]
+        assert manual_fields == [], (
+            f"No fields were edited but these were marked Manual: {manual_fields}"
+        )
+
+    def test_changed_field_marked_manual_unchanged_fields_keep_source(self, tmp_path):
+        if not _PDF_LIBS_AVAILABLE:
+            pytest.skip("PDF libraries not installed")
+        fixture = FIXTURES / "invoice_format_a_full.pdf"
+        if not fixture.exists():
+            pytest.skip("invoice_format_a_full.pdf not present")
+        pipeline = _make_pipeline(tmp_path)
+        r = pipeline.process_bytes(fixture.name, fixture.read_bytes())
+
+        corrected = dict(r.extracted_data)
+        corrected["vendor_name"] = "Manually Overridden Vendor"
+
+        reviewed = pipeline.finalize_review(
+            source_file=r.source_file,
+            upload_path=r.upload_path,
+            parsed_text=r.parsed_text,
+            corrected_data=corrected,
+            extraction_mode="adaptive-local",
+            learn_from_upload=False,
+            approve_for_future_matching=False,
+            content_hash=r.content_hash,
+            original_extracted=r.extracted_data,
+        )
+        assert reviewed.field_sources.get("vendor_name") == "Manual", (
+            "Edited field must be marked Manual"
+        )
+        non_manual = [
+            f for f, s in reviewed.field_sources.items()
+            if f != "vendor_name" and s == "Manual"
+        ]
+        assert non_manual == [], (
+            f"Unedited fields must not be marked Manual: {non_manual}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Unexpected extraction error handling (e.g. Groq "Execution failed")
 # ---------------------------------------------------------------------------
 
@@ -1874,7 +1942,7 @@ class TestGetRequiredFields:
 
     def test_invoice_required_keys(self):
         from src.doc_ai.schema_config import get_required_fields
-        assert get_required_fields("invoice") == {"vendor_name", "invoice_number", "invoice_date", "total_amount"}
+        assert get_required_fields("invoice") == {"vendor_name", "invoice_number", "invoice_date", "total_amount", "line_items"}
 
     def test_nda_required_keys_match_actual_field_names(self):
         from src.doc_ai.schema_config import get_required_fields
@@ -1896,9 +1964,9 @@ class TestRequiredFieldPassesByDocType:
         from src.doc_ai.schemas import ValidationCheck
         return [ValidationCheck(field=f, status="pass", message="ok") for f in fields]
 
-    def test_invoice_requires_four_fields(self):
+    def test_invoice_requires_core_fields_including_line_items(self):
         from src.doc_ai.pipeline import DocumentPipeline
-        checks = self._make_checks(["vendor_name", "invoice_number", "invoice_date", "total_amount"])
+        checks = self._make_checks(["vendor_name", "invoice_number", "invoice_date", "total_amount", "line_items"])
         assert DocumentPipeline._has_required_field_passes(checks, "invoice") is True
 
     def test_invoice_fails_without_invoice_number(self):
@@ -2064,7 +2132,8 @@ class TestNeedsLlmFallback:
     def test_invoice_no_fallback_when_complete(self):
         from src.doc_ai.extractors import _needs_llm_fallback
         extracted = {"document_type": "invoice", "vendor_name": "Acme", "invoice_number": "INV-1",
-                     "invoice_date": "2026-01-01", "total_amount": 100.0}
+                     "invoice_date": "2026-01-01", "total_amount": 100.0,
+                     "line_items": '[{"description": "Widget", "amount": 100.0}]'}
         assert _needs_llm_fallback(extracted) is False
 
     def test_business_doc_no_fallback_with_company_name(self):
@@ -2446,3 +2515,465 @@ class TestFinalizeReviewPreservesProcessingTrace:
         llm_steps = [s for s in final_trace if "llm" in s.lower()]
         assert llm_steps, "LLM processing step must be preserved after finalize_review"
         assert any("human-reviewed" in s.lower() for s in final_trace), "Review step must also be present"
+
+
+# ---------------------------------------------------------------------------
+# Multi-field line anchor building (Fix A regression)
+# ---------------------------------------------------------------------------
+
+class TestMultiFieldLineAnchors:
+    """_build_anchors must produce bounded patterns for lines that pack multiple
+    'Label: value' pairs together, e.g. 'Invoice #: INV-001 Date: Jan 1 PO Number: PO-9'."""
+
+    MULTIFIELD_LINE = "Invoice #: INV-263322 Date: May 19, 2025 PO Number: PO-966171"
+    EXTRACTED = {
+        "document_type": "invoice",
+        "invoice_number": "INV-263322",
+        "invoice_date": "May 19, 2025",
+        "po_number": "PO-966171",
+    }
+
+    def _mem(self, tmp_path):
+        from src.doc_ai.template_memory import TemplateMemory
+        return TemplateMemory(tmp_path / "tmpl.json")
+
+    def test_invoice_number_anchor_built_from_multifield_line(self, tmp_path):
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "invoice_number" in anchors, "invoice_number anchor must be built from multi-field line"
+
+    def test_date_anchor_built_from_multifield_line(self, tmp_path):
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "invoice_date" in anchors, "invoice_date anchor must be built from multi-field line"
+
+    def test_po_number_anchor_built_from_multifield_line(self, tmp_path):
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "po_number" in anchors, "po_number anchor must be built from multi-field line"
+
+    def test_anchor_pattern_extracts_correct_value_on_new_document(self, tmp_path):
+        """Stored bounded pattern must capture the right value, not the full tail."""
+        import re
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "invoice_number" in anchors
+        pat = anchors["invoice_number"]["pattern"]
+        new_line = "Invoice #: INV-999999 Date: June 1, 2025 PO Number: PO-111111"
+        m = re.search(pat, new_line, re.IGNORECASE)
+        assert m is not None
+        assert m.group("value").strip() == "INV-999999"
+
+    def test_anchor_pattern_does_not_capture_adjacent_fields(self, tmp_path):
+        """Bounded pattern must stop before the next label, not bleed into it."""
+        import re
+        mem = self._mem(tmp_path)
+        anchors = mem._build_anchors(self.EXTRACTED, [self.MULTIFIELD_LINE])
+        assert "invoice_date" in anchors
+        pat = anchors["invoice_date"]["pattern"]
+        new_line = "Invoice #: INV-999999 Date: June 1, 2025 PO Number: PO-111111"
+        m = re.search(pat, new_line, re.IGNORECASE)
+        assert m is not None
+        captured = m.group("value").strip()
+        assert "PO Number" not in captured, f"Date anchor bled into PO Number: {captured!r}"
+        assert captured == "June 1, 2025"
+
+    def test_simple_single_label_line_still_works(self, tmp_path):
+        """Single-label lines must still produce a simple greedy pattern."""
+        import re
+        mem = self._mem(tmp_path)
+        extracted = {"document_type": "invoice", "due_date": "May 31, 2025"}
+        anchors = mem._build_anchors(extracted, ["Due Date: May 31, 2025"])
+        assert "due_date" in anchors
+        pat = anchors["due_date"]["pattern"]
+        m = re.search(pat, "Due Date: June 15, 2026", re.IGNORECASE)
+        assert m is not None
+        assert m.group("value").strip() == "June 15, 2026"
+
+
+# ---------------------------------------------------------------------------
+# Multi-field row splitting in spatial extractor (Fix B regression)
+# ---------------------------------------------------------------------------
+
+class TestSplitMultifieldValue:
+    """_split_multifield_value must split 'Label1: v1 Label2: v2' rows correctly."""
+
+    def test_splits_three_field_invoice_line(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        text = "Invoice #: INV-263322 Date: May 19, 2025 PO Number: PO-966171"
+        result = _split_multifield_value(text)
+        assert result.get("invoice #") == "INV-263322"
+        assert result.get("date") == "May 19, 2025"
+        assert result.get("po number") == "PO-966171"
+
+    def test_returns_empty_for_single_colon_line(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        result = _split_multifield_value("Invoice Number: INV-001")
+        assert result == {}
+
+    def test_returns_empty_for_no_colon_line(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        assert _split_multifield_value("just some text here") == {}
+
+    def test_does_not_include_unknown_labels(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        text = "Invoice #: INV-001 FooBarBaz: xyz"
+        result = _split_multifield_value(text)
+        # Only 'invoice #' is a known label; FooBarBaz is not → fewer than 2 known labels
+        assert result == {}
+
+    def test_two_known_labels_splits_correctly(self):
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        result = _split_multifield_value("Due Date: May 31, 2025 Total: 1500.00")
+        assert result.get("due date") == "May 31, 2025"
+        assert result.get("total") == "1500.00"
+
+
+# ---------------------------------------------------------------------------
+# TemplateOnlyExtractor uses spatial anchors (Fix C regression)
+# ---------------------------------------------------------------------------
+
+class TestTemplateOnlyExtractorUsesSpatialsAnchors:
+    """TemplateOnlyExtractor must call _apply_spatial_anchors after text anchor
+    extraction so stored position-based anchors are also consulted."""
+
+    def test_spatial_anchors_called_after_text_anchors_in_template_only_mode(self, tmp_path):
+        """_apply_spatial_anchors must be reached after _extract_from_template.
+
+        Store a template with one text anchor (so it matches via anchor fallback)
+        but an empty zone_density.  The spatial_anchors list is present but empty
+        so _apply_spatial_anchors is a no-op — what matters is the call happens
+        without raising and the trace includes the template match message.
+        """
+        import json
+        from src.doc_ai.extractors import TemplateOnlyExtractor
+        from src.doc_ai.template_memory import TemplateMemory
+        from src.doc_ai.schemas import ParsedDocument
+
+        store = tmp_path / "tmpl.json"
+        mem = TemplateMemory(store)
+
+        # Template with a text anchor that matches raw_text so score >= 0.55 via
+        # the anchor-fallback path in find_best_match (zone_density is empty on
+        # both sides → cosine_similarity = 0.0 → text anchor fallback fires).
+        template = {
+            "template_name": "test_inv",
+            "document_type": "invoice",
+            "signature": {"zone_density": []},
+            "anchors": {
+                "invoice_number": {
+                    "label": "Invoice #",
+                    "pattern": r"Invoice \#\s*:\s*(?P<value>.+)",
+                }
+            },
+            "spatial_anchors": [],
+        }
+        store.write_text(json.dumps([template]))
+
+        doc = ParsedDocument(
+            file_name="invoice.pdf",
+            file_path=None,
+            raw_text="Invoice #: INV-001\nTotal: $500.00",
+            sections=["Invoice #: INV-001", "Total: $500.00"],
+            metadata={},
+        )
+        extractor = TemplateOnlyExtractor(mem)
+        result, trace = extractor.extract_with_trace(doc)
+
+        assert any("template" in step.lower() for step in trace), "template match step must appear in trace"
+        # Text anchor extracted the invoice number
+        assert result.get("invoice_number") == "INV-001"
+
+
+# ---------------------------------------------------------------------------
+# First-line vendor_name heuristic (regression for unlabeled company name)
+# ---------------------------------------------------------------------------
+
+class TestFirstLineVendorNameHeuristic:
+    """RuleBasedInvoiceExtractor must extract vendor_name from the first text
+    line when no labeled Vendor:/Supplier:/From: line is present."""
+
+    def _make_doc(self, text: str) -> "ParsedDocument":
+        from src.doc_ai.schemas import ParsedDocument
+        return ParsedDocument(
+            file_name="inv.pdf",
+            file_path=None,
+            raw_text=text,
+            sections=[l.strip() for l in text.splitlines() if l.strip()],
+            metadata={},
+        )
+
+    def test_unlabeled_company_name_first_line(self):
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "Atlas Financial Services\n"
+            "990 Park Avenue, New York\n"
+            "INVOICE\n"
+            "Invoice #: INV-001\n"
+            "Date: May 1, 2025\n"
+            "Total: $500.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        assert result["vendor_name"] == "Atlas Financial Services"
+
+    def test_labeled_vendor_takes_precedence(self):
+        """When a Vendor: label is present the heuristic must not override it."""
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "Some Header Line\n"
+            "INVOICE\n"
+            "Vendor: Acme Corp\n"
+            "Invoice #: INV-002\n"
+            "Total: $200.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        assert result["vendor_name"] == "Acme Corp"
+
+    def test_does_not_capture_address_line(self):
+        """A first line starting with a digit (street address) must be skipped."""
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "123 Main Street\n"
+            "Best Supplies Co\n"
+            "INVOICE\n"
+            "Invoice #: INV-003\n"
+            "Total: $100.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        # Address line must be skipped; company name on second line is captured
+        assert result["vendor_name"] == "Best Supplies Co"
+
+    def test_stops_before_invoice_keyword(self):
+        """Lines at or after the INVOICE header must not be captured."""
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "INVOICE\n"
+            "Invoice #: INV-004\n"
+            "Total: $300.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        assert result["vendor_name"] is None
+
+    def test_does_not_capture_email_line(self):
+        from src.doc_ai.extractors import RuleBasedInvoiceExtractor
+        text = (
+            "billing@example.com\n"
+            "Greenleaf Office Supplies\n"
+            "INVOICE\n"
+            "Invoice #: INV-005\n"
+            "Total: $150.00\n"
+        )
+        result = RuleBasedInvoiceExtractor().extract(self._make_doc(text))
+        assert result["vendor_name"] == "Greenleaf Office Supplies"
+
+
+# ---------------------------------------------------------------------------
+# Business doc: OCR single-line KPI and pipe-value filtering
+# ---------------------------------------------------------------------------
+
+class TestBusinessDocOcrKpiAndPipeFilter:
+    """Regressions for image-only business_doc documents processed via Tesseract.
+
+    Two issues observed when OCR flattens the KPI table to one line and uses
+    pipe characters as visual column separators:
+    1. KPIs came back empty because the multi-line parser found no rows.
+    2. approved_by was set to '|' (a bare pipe separator with no name).
+    """
+
+    _KPI_LINE = (
+        "Revenue ($M) 51.93 41.14 +26% Strong "
+        "EBITDA Margin (%) 29.2 26.5 +2.7 pts On Track "
+        "Customer Retention (%) 93.4 89.3 +4.1% On Track "
+        "New Customer Acquisition 378 273 +105 Strong "
+        "Employee Satisfaction 84/100 79/100 +5 pts Strong"
+    )
+
+    def test_inline_kpi_parser_extracts_all_entries(self):
+        from src.doc_ai.extractors import _parse_kpis_inline
+        kpis = _parse_kpis_inline(self._KPI_LINE)
+        assert len(kpis) == 5
+        metrics = [k["metric"] for k in kpis]
+        assert "Revenue ($M)" in metrics
+        assert "EBITDA Margin (%)" in metrics
+        assert "Employee Satisfaction" in metrics
+
+    def test_inline_kpi_parser_strips_status_prefix(self):
+        """Status words like 'Strong' and 'On Track' must not leak into the next metric name."""
+        from src.doc_ai.extractors import _parse_kpis_inline
+        kpis = _parse_kpis_inline(self._KPI_LINE)
+        metrics = [k["metric"] for k in kpis]
+        for m in metrics:
+            assert not m.startswith("Strong"), f"Status leaked into metric: {m!r}"
+            assert not m.startswith("On Track"), f"Status leaked into metric: {m!r}"
+
+    def test_inline_kpi_values_correct(self):
+        from src.doc_ai.extractors import _parse_kpis_inline
+        kpis = _parse_kpis_inline(self._KPI_LINE)
+        revenue = next(k for k in kpis if k["metric"] == "Revenue ($M)")
+        assert revenue["current_period"] == "51.93"
+        assert revenue["prior_period"] == "41.14"
+        assert revenue["variance"] == "+26%"
+
+    def test_full_extractor_parses_kpis_from_ocr_single_line(self):
+        """End-to-end: extractor must return KPIs when OCR collapses the table."""
+        from src.doc_ai.extractors import RuleBasedBusinessDocExtractor
+        from src.doc_ai.schemas import ParsedDocument
+        text = (
+            "Meridian Cloud Inc.\n"
+            "STRATEGIC INITIATIVE BRIEFING Period Ending: March 19, 2025\n"
+            "EXECUTIVE SUMMARY\nSome summary text.\n"
+            "KEY PERFORMANCE INDICATORS\n"
+            f"{self._KPI_LINE}\n"
+            "STRATEGIC RECOMMENDATIONS\n"
+            "1. Do something.\n"
+            "Prepared by: Kevin Mitchell Approved by: | Date: March 25, 2025\n"
+        )
+        doc = ParsedDocument(
+            file_name="bd.pdf", file_path=None,
+            raw_text=text,
+            sections=[l.strip() for l in text.splitlines() if l.strip()],
+            metadata={},
+        )
+        result = RuleBasedBusinessDocExtractor().extract(doc)
+        assert len(result["kpis"]) == 5, f"Expected 5 KPIs, got {result['kpis']}"
+
+    def test_pipe_value_not_stored_as_approved_by(self):
+        """approved_by must be None when the OCR value is just a pipe separator."""
+        from src.doc_ai.extractors import RuleBasedBusinessDocExtractor
+        from src.doc_ai.schemas import ParsedDocument
+        text = (
+            "Meridian Cloud Inc.\n"
+            "STRATEGIC INITIATIVE BRIEFING Period Ending: March 19, 2025\n"
+            "Prepared by: Kevin Mitchell Approved by: | Date: March 25, 2025\n"
+        )
+        doc = ParsedDocument(
+            file_name="bd.pdf", file_path=None,
+            raw_text=text,
+            sections=[l.strip() for l in text.splitlines() if l.strip()],
+            metadata={},
+        )
+        result = RuleBasedBusinessDocExtractor().extract(doc)
+        assert result.get("approved_by") != "|", "Pipe separator must not be stored as approved_by"
+
+    def test_split_multifield_skips_pipe_only_value(self):
+        """_split_multifield_value must not return values that contain no alphanumeric chars."""
+        from src.doc_ai.spatial_extractor import _split_multifield_value
+        result = _split_multifield_value(
+            "Prepared by: Kevin Mitchell Approved by: | Date: March 25, 2025"
+        )
+        assert "approved by" not in result, "Pipe-only value should be filtered out"
+        assert result.get("prepared by") == "Kevin Mitchell"
+
+
+class TestSemanticFingerprint:
+    """Tests for _compute_semantic_fingerprint and semantic-fingerprint dedup."""
+
+    def test_returns_empty_when_fewer_than_two_fields(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        result = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice", {"vendor_name": "Acme", "invoice_number": None, "invoice_date": None, "total_amount": None}
+        )
+        assert result == "", "Single populated field should not produce a fingerprint"
+
+    def test_returns_empty_for_unknown_doc_type(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        result = DocumentPipeline._compute_semantic_fingerprint("unknown_type", {"foo": "bar"})
+        assert result == ""
+
+    def test_returns_hash_when_two_or_more_fields_populated(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        result = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "Acme Corp", "invoice_number": "INV-001",
+             "invoice_date": "2025-01-15", "total_amount": None},
+        )
+        assert len(result) == 64, "Should return a SHA-256 hex digest (64 chars)"
+
+    def test_fingerprint_is_case_insensitive(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        fp1 = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "ACME CORP", "invoice_number": "INV-001",
+             "invoice_date": "2025-01-15", "total_amount": "100.00"},
+        )
+        fp2 = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "acme corp", "invoice_number": "inv-001",
+             "invoice_date": "2025-01-15", "total_amount": "100.00"},
+        )
+        assert fp1 == fp2, "Fingerprint must be case-insensitive"
+
+    def test_different_docs_produce_different_fingerprints(self):
+        from src.doc_ai.pipeline import DocumentPipeline
+        fp1 = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "Acme", "invoice_number": "INV-001",
+             "invoice_date": "2025-01-15", "total_amount": "100.00"},
+        )
+        fp2 = DocumentPipeline._compute_semantic_fingerprint(
+            "invoice",
+            {"vendor_name": "Acme", "invoice_number": "INV-002",
+             "invoice_date": "2025-01-15", "total_amount": "100.00"},
+        )
+        assert fp1 != fp2
+
+    def test_store_fingerprint_dedup(self, tmp_path):
+        """has_been_processed_by_fingerprint returns False before persist, True after."""
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.storage import ResultStore
+        from src.doc_ai.schemas import ValidationCheck
+        import dataclasses
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        settings = dataclasses.replace(
+            settings, data_dir=tmp_path, database_path=tmp_path / "test.db",
+            output_dir=tmp_path,
+        )
+        store = ResultStore(settings)
+
+        fp = "a" * 64  # fake 64-char fingerprint
+        assert not store.has_been_processed_by_fingerprint(fp)
+        assert not store.has_been_processed_by_fingerprint("")  # empty must never match
+
+        dummy_check = ValidationCheck(field="invoice_number", status="pass", message="ok")
+        store.persist(
+            source_file_name="doc.pdf",
+            extracted_data={"document_type": "invoice", "invoice_number": "INV-001"},
+            validation_checks=[dummy_check],
+            extraction_trace=["step 1"],
+            content_hash="",
+            original_filename="doc.pdf",
+            semantic_fingerprint=fp,
+        )
+        assert store.has_been_processed_by_fingerprint(fp)
+
+    def test_pipeline_blocks_semantic_duplicate(self, tmp_path):
+        """Processing the same doc twice (different bytes, same extracted fields) is blocked."""
+        from src.doc_ai.config import get_settings
+        from src.doc_ai.pipeline import DocumentPipeline
+        import dataclasses
+
+        get_settings.cache_clear()
+        settings = get_settings()
+        settings = dataclasses.replace(settings, data_dir=tmp_path)
+        pipeline = DocumentPipeline(settings)
+
+        invoice_text = (
+            "Acme Corp\n"
+            "INVOICE\n"
+            "Invoice Number: INV-2025-001\n"
+            "Invoice Date: 2025-01-15\n"
+            "Total: $250.00\n"
+        )
+        # First upload
+        r1 = pipeline.process_bytes("inv.txt", _txt_bytes(invoice_text))
+        assert not any("Semantic fingerprint" in e for e in r1.errors), \
+            "First upload should not be flagged as duplicate"
+
+        # Second upload with slightly different raw bytes (extra trailing newline) but same content
+        r2 = pipeline.process_bytes("inv_copy.txt", _txt_bytes(invoice_text + "\n\n"))
+        is_dup = r2.summary.get("duplicate") or any(
+            "Semantic fingerprint" in e or "Duplicate" in e for e in r2.errors
+        )
+        assert is_dup, "Second upload of same document must be flagged as duplicate"
