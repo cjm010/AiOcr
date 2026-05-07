@@ -443,8 +443,7 @@ class ResultStore:
                 pd.DataFrame([type_row]).to_sql(type_table, conn, if_exists="append", index=False)
 
             # Write per-field stats
-            doc_type_for_stats = extracted_data.get("document_type", "invoice")
-            catalog_fields = FIELD_CATALOG.get(doc_type_for_stats, [])
+            catalog_fields = FIELD_CATALOG.get(doc_type, [])
             if catalog_fields:
                 stats_rows = []
                 for f in catalog_fields:
@@ -453,12 +452,15 @@ class ResultStore:
                     is_null = 1 if val in (None, "", []) else 0
                     stats_rows.append({
                         "source_file": source_file_name,
-                        "document_type": doc_type_for_stats,
+                        "document_type": doc_type,
                         "field_name": key,
                         "is_null": is_null,
                         "extraction_source": (field_sources or {}).get(key) if not is_null else None,
                         "confidence": (field_confidence or {}).get(key) if not is_null else None,
                     })
-                pd.DataFrame(stats_rows).to_sql("field_stats", conn, if_exists="append", index=False)
+                try:
+                    pd.DataFrame(stats_rows).to_sql("field_stats", conn, if_exists="append", index=False)
+                except Exception:
+                    pass
         finally:
             conn.close()
